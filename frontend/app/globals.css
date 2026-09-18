@@ -1,0 +1,90 @@
+/* ============================================================================
+   app/globals.css
+
+   WHAT THIS FILE DOES (in plain words):
+   This is the app's "paint palette and ruler" - it defines the colors and
+   text sizes ONE time, as named variables (like --color-primary). Every
+   other file then reuses these names instead of typing raw color codes
+   everywhere. This means if you ever want to change the app's main color,
+   you change it in exactly ONE place here, and it updates everywhere.
+
+   The sizes are intentionally large. This app is for elderly users, many of
+   whom find small text hard to read, so even the "small" text here is
+   bigger than what a typical app would use.
+   ============================================================================ */
+
+:root {
+  /* --- Colors --- */
+  /* A warm marigold-orange, used for the header/hero background. Chosen
+     because it feels bright and welcoming rather than clinical, and echoes
+     colors familiar from Nepali festivals (marigold flowers, tika). */
+  --color-hero-start: #ff9f1c;
+  --color-hero-end: #ffb703;
+
+  /* A near-white warm cream, used for the card that holds the actual
+     content/buttons, so text stays easy to read against a busy bright
+     background. */
+  --color-surface: #fffdf7;
+
+  /* A deep teal, used for the main "do this" button. Chosen for strong
+     contrast against the orange background so it's unmistakably the thing
+     to press. */
+  --color-primary: #0b6e4f;
+  --color-primary-pressed: #084d38;
+
+  /* Used only for warnings, such as an expired medicine. Kept rare on
+     purpose so it still grabs attention when it appears. */
+  --color-danger: #d62828;
+  --color-danger-surface: #fdeaea;
+
+  /* Used for the "this is correct" confirmation state. */
+  --color-success: #2a9134;
+  --color-success-surface: #eaf7ec;
+
+  /* Main text color - a dark ink-navy instead of pure black, which is
+     slightly softer on the eyes at large sizes while staying high
+     contrast. */
+  --color-text: #1b263b;
+  --color-text-on-primary: #ffffff;
+
+  /* --- Font sizes ---
+     Named by what they're used for, not just "small/medium/large", so it's
+     obvious where each one belongs. */
+  --font-family: "Baloo 2", system-ui, sans-serif;
+
+  --font-size-body: 22px; /* baseline reading text - large for readability */
+  --font-size-heading: 32px; /* screen titles */
+  --font-size-button: 26px; /* button labels - must be readable at a glance */
+  --font-size-label: 20px; /* small helper text, still large by normal standards */
+
+  /* --- Spacing / touch targets ---
+     Buttons must be big enough for an older user to tap accurately. */
+  --touch-target-min: 64px;
+  --radius-large: 28px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-family);
+  color: var(--color-text);
+  font-size: var(--font-size-body);
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  font-family: var(--font-family);
+  cursor: pointer;
+}
+
+/* Makes sure a keyboard/switch-device user can always see which element is
+   focused - important for accessibility, not just mouse/touch users. */
+:focus-visible {
+  outline: 4px solid var(--color-primary);
+  outline-offset: 2px;
+}
