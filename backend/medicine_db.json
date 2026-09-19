@@ -1,0 +1,40 @@
+{
+  "_comment": "This is a STARTER sample database with a handful of very common medicines, so main.py has something real to look up against while you test. The generic uses described here (paracetamol for fever/pain, ORS for dehydration, etc.) are standard, well-known medical facts. The exact Nepal-market BRAND NAMES are a small placeholder list - you should expand/verify these yourself against what's actually common in your village, since that's local knowledge I don't have reliable data on.",
+
+  "by_barcode": {
+    "_comment": "Maps a scanned barcode number to a medicine id below. Empty for now - you fill this in as you scan real medicine boxes and note their barcode + what medicine it actually is. Example: \"8901234567890\": \"paracetamol_500mg\""
+  },
+
+  "medicines": {
+    "paracetamol_500mg": {
+      "brand_names": ["Napa", "Paracetamol", "Nupental"],
+      "generic_name": "Paracetamol",
+      "use_ne": "टाउको दुखाइ र ज्वरोको लागि प्रयोग गरिन्छ",
+      "use_en": "Used for fever and mild pain (headache, body ache)"
+    },
+    "ors": {
+      "brand_names": ["ORS", "Jeevan Jal"],
+      "generic_name": "Oral Rehydration Salts",
+      "use_ne": "पखाला वा शरीरमा पानीको कमी हुँदा प्रयोग गरिन्छ",
+      "use_en": "Used for dehydration, especially from diarrhea"
+    },
+    "omeprazole_20mg": {
+      "brand_names": ["Omez", "Omeprazole"],
+      "generic_name": "Omeprazole",
+      "use_ne": "पेट दुखाइ र एसिडिटीको लागि प्रयोग गरिन्छ",
+      "use_en": "Used for acidity and stomach pain"
+    },
+    "cetirizine_10mg": {
+      "brand_names": ["Cetrizin", "Alerid"],
+      "generic_name": "Cetirizine",
+      "use_ne": "छारछुई, एलर्जी वा चिलाउनेको लागि प्रयोग गरिन्छ",
+      "use_en": "Used for allergies, itching, and runny nose"
+    },
+    "amoxicillin_500mg": {
+      "brand_names": ["Amoxicillin", "Moxikind"],
+      "generic_name": "Amoxicillin",
+      "use_ne": "ब्याक्टेरियाजन्य संक्रमणको लागि प्रयोग गरिने एन्टिबायोटिक",
+      "use_en": "Antibiotic used for bacterial infections"
+    }
+  }
+}

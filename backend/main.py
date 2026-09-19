@@ -10,40 +10,48 @@
 #                                      confirm or correct the guess)
 #
 # It tries to answer question 1 in THREE STEPS, in order, stopping as soon
-# as one step succeeds - this matches the plan we agreed on:
+# as one step succeeds:
 #
-#   STEP 1 - BARCODE: Many medicine boxes have a barcode. If we can read
-#            one, and we already know what that barcode means (from our own
-#            small database), that's the fastest and most reliable answer.
+#   STEP 1 - BARCODE (handled right here in main.py): Many medicine boxes
+#            have a barcode. If we can read one, and we already know what
+#            that barcode means (from our own small database), that's the
+#            fastest and most reliable answer.
 #
-#   STEP 2 - OCR (reading the printed text): If there's no barcode, or we
-#            don't recognize it, we read whatever text IS printed on the
-#            box/strip (in Nepali and/or English) and try to match it
-#            against medicine names we know.
+#   STEP 2 - OCR, i.e. reading the printed text (see ocr.py): If there's no
+#            barcode, or we don't recognize it, we read whatever text IS
+#            printed on the box/strip and try to match it against medicine
+#            names we know.
 #
-#   STEP 3 - VISION MODEL (fallback): If OCR text is unclear or matches
-#            nothing we know (common with worn, creased, or unfamiliar
-#            packaging), we ask an AI vision model to just LOOK at the
-#            photo directly and describe what medicine it thinks this is.
-#            This step needs internet + a free API key (see .env.example).
+#   STEP 3 - VISION MODEL fallback (see vision_fallback.py): If OCR text is
+#            unclear or matches nothing we know, we ask an AI vision model
+#            to just LOOK at the photo directly and describe what medicine
+#            it thinks this is. Needs internet + a free API key.
 #
-# Expiry-date reading is attempted throughout using a simple pattern-search
-# (looking for words like "EXP" or "म्याद" near something that looks like a
-# date), independent of which of the 3 steps above identified the medicine.
+# Expiry-date reading (see expiry_parser.py) is attempted throughout using
+# a simple pattern-search, independent of which of the 3 steps above
+# identified the medicine.
+#
+# NOTE ON FILE STRUCTURE: Steps 2 and 3, and expiry-date parsing, each live
+# in their OWN file (ocr.py, vision_fallback.py, expiry_parser.py). This
+# file (main.py) is the "conductor" - it decides the ORDER things happen
+# in and combines the results, but the detailed "how" for each step lives
+# in that step's own file. Step 1 (barcode) is simple enough that it still
+# lives directly in this file.
 # ==============================================================================
 
 import os
-import re
 import io
 import json
-from datetime import date
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
-import pytesseract
 from pyzbar.pyzbar import decode as decode_barcodes
 from dotenv import load_dotenv
+
+from ocr import try_ocr_lookup
+from vision_fallback import create_vision_model, try_vision_fallback
+from expiry_parser import find_expiry_text
 
 # Loads the GEMINI_API_KEY (and any other secrets) from a local ".env" file,
 # if one exists. See .env.example for what variable names are expected.
@@ -86,92 +94,19 @@ with open(DB_PATH, "r", encoding="utf-8") as db_file:
 MEDICINES_BY_ID = _raw_db["medicines"]
 BARCODE_TO_ID = _raw_db["by_barcode"]
 # The JSON file has some "_comment" keys used only to explain itself to
-# humans reading it - they're not real barcodes, so we remove them here.
+# humans reading it - they're not real barcodes/medicines, so we remove
+# them here.
 BARCODE_TO_ID.pop("_comment", None)
 
 # ------------------------------------------------------------------------
 # Set up the vision-model fallback (Step 3), only if an API key was
 # provided. If it wasn't, the app still works - it just can't use Step 3,
-# and will say so honestly instead of crashing.
+# and will say so honestly instead of crashing. This setup runs ONCE here
+# at server startup - see vision_fallback.py for why that matters.
 # ------------------------------------------------------------------------
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-_vision_model = None
-
-if GEMINI_API_KEY:
-    import google.generativeai as genai
-
-    genai.configure(api_key=GEMINI_API_KEY)
-    # NOTE: Google renames/updates their free-tier model names occasionally.
-    # "gemini-1.5-flash" is correct as of this writing, but if this line
-    # errors out with a "model not found" message, check
-    # https://ai.google.dev/gemini-api/docs/models for the current free
-    # model name and update the string below.
-    _vision_model = genai.GenerativeModel("gemini-1.5-flash")
-
-
-# ------------------------------------------------------------------------
-# STEP 2 helper: try to read an expiry date out of whatever text we have
-# (whether that text came from OCR or from the vision model).
-# ------------------------------------------------------------------------
-
-# Words that typically appear right before/near an expiry date on
-# packaging, in both English and Nepali. If we see one of these words, we
-# know a date is probably nearby.
-EXPIRY_KEYWORDS = [
-    r"exp\.?",
-    r"expiry",
-    r"expiry date",
-    r"best before",
-    r"best after",
-    r"use before",
-    r"म्याद",
-    r"म्याद सकिने",
-]
-
-# Common ways an expiry date is printed on packaging:
-#   12/2026        (MM/YYYY)
-#   12/26           (MM/YY)
-#   12-2026
-#   05/12/2026      (DD/MM/YYYY)
-DATE_PATTERN = re.compile(
-    r"(\d{1,2}[/\-]\d{4})|(\d{1,2}[/\-]\d{2})(?!\d)|(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})"
-)
-
-
-def find_expiry_text(raw_text: str) -> str | None:
-    """
-    Looks through `raw_text` for an expiry-related keyword, and if found,
-    searches the nearby text for something that looks like a date.
-
-    Returns the raw matched date text (e.g. "12/2026") if found, or None
-    if nothing date-like was found near an expiry keyword.
-
-    NOTE: This deliberately returns the RAW text, not a cleaned-up date,
-    because the frontend should show the user exactly what was found
-    (next to the confirm/correct buttons) rather than us silently
-    "interpreting" it - reducing the chance of a wrong guess reaching the
-    user unchecked.
-    """
-    lowered = raw_text.lower()
-
-    for keyword in EXPIRY_KEYWORDS:
-        keyword_match = re.search(keyword, lowered)
-        if not keyword_match:
-            continue
-
-        # Look at a window of text starting right after the keyword (the
-        # date is almost always printed right after words like "EXP"), up
-        # to 20 characters ahead - enough room for a date, not so much that
-        # we might grab an unrelated number from elsewhere on the label.
-        window_start = keyword_match.end()
-        window_text = raw_text[window_start : window_start + 20]
-
-        date_match = DATE_PATTERN.search(window_text)
-        if date_match:
-            return date_match.group(0)
-
-    return None
+_vision_model = create_vision_model(GEMINI_API_KEY)
 
 
 # ------------------------------------------------------------------------
@@ -213,101 +148,6 @@ def try_barcode_lookup(image: Image.Image) -> dict | None:
 
 
 # ------------------------------------------------------------------------
-# STEP 2: try to identify the medicine by reading the printed text (OCR).
-# ------------------------------------------------------------------------
-
-def try_ocr_lookup(image: Image.Image) -> dict:
-    """
-    Reads whatever text is visible in the image (in Nepali and/or English)
-    and tries to match it against the brand/generic names in our database.
-
-    Always returns a dict (never None) - even if nothing matched, the
-    caller still needs the raw OCR text to search for an expiry date.
-    """
-    # "nep+eng" tells Tesseract to try recognizing BOTH Devanagari and
-    # Latin script in the same pass, since packaging often mixes both
-    # (e.g. an English brand name next to Nepali usage instructions).
-    # NOTE: this requires the Nepali language pack to be installed on the
-    # system - see the setup note at the bottom of this file if you get a
-    # "nep.traineddata not found" style error.
-    raw_text = pytesseract.image_to_string(image, lang="nep+eng")
-
-    matched_medicine_id = None
-    lowered_text = raw_text.lower()
-
-    for medicine_id, info in MEDICINES_BY_ID.items():
-        if medicine_id == "_comment":
-            continue
-        names_to_check = [info["generic_name"]] + info.get("brand_names", [])
-        for name in names_to_check:
-            if name.lower() in lowered_text:
-                matched_medicine_id = medicine_id
-                break
-        if matched_medicine_id:
-            break
-
-    return {
-        "source": "ocr" if matched_medicine_id else "ocr_unmatched",
-        "medicine_id": matched_medicine_id,
-        "raw_text": raw_text,
-    }
-
-
-# ------------------------------------------------------------------------
-# STEP 3 (fallback): ask the vision model to look at the photo directly.
-# ------------------------------------------------------------------------
-
-def try_vision_fallback(image: Image.Image) -> dict:
-    """
-    Only called when barcode + OCR both failed to confidently identify the
-    medicine. Sends the photo to a vision-capable AI model and asks it to
-    describe the medicine, its purpose, and any expiry text it can see.
-
-    Returns a dict describing what it found, or a dict with
-    source="vision_unavailable" if no API key was configured, so the
-    caller (and eventually the user) knows WHY no answer came back,
-    instead of it looking like a silent failure.
-    """
-    if _vision_model is None:
-        return {"source": "vision_unavailable", "medicine_name": None, "raw_text": ""}
-
-    # We ask specifically for JSON output so our code can parse it
-    # reliably, instead of trying to make sense of free-form paragraphs.
-    prompt = (
-        "You are looking at a photo of a medicine box or strip, possibly "
-        "with Nepali and/or English text on it. "
-        "Reply with ONLY a JSON object (no extra words, no markdown) in "
-        "exactly this shape: "
-        '{"medicine_name": "...", "purpose_ne": "...", "expiry_text": "..."}. '
-        "purpose_ne must be written in Nepali, in one short simple sentence "
-        "a non-medical person can understand. "
-        "expiry_text should be the expiry date exactly as printed, or an "
-        "empty string if you cannot find one. "
-        "If you are not confident what the medicine is, set medicine_name "
-        "to an empty string rather than guessing."
-    )
-
-    try:
-        response = _vision_model.generate_content([prompt, image])
-        # The model sometimes wraps JSON in ```json ... ``` even when asked
-        # not to - this strips that off before parsing, just in case.
-        cleaned = response.text.strip().strip("`").removeprefix("json").strip()
-        parsed = json.loads(cleaned)
-    except Exception:
-        # Could be a network error, a rate-limit (free tier), or the model
-        # replying in a format we couldn't parse. Either way, we fail
-        # gracefully rather than crashing the whole request.
-        return {"source": "vision_error", "medicine_name": None, "raw_text": ""}
-
-    return {
-        "source": "vision",
-        "medicine_name": parsed.get("medicine_name") or None,
-        "purpose_ne": parsed.get("purpose_ne") or None,
-        "raw_text": parsed.get("expiry_text") or "",
-    }
-
-
-# ------------------------------------------------------------------------
 # The main endpoint the frontend calls: POST /scan with an image file.
 # ------------------------------------------------------------------------
 
@@ -339,7 +179,7 @@ async def scan_medicine(photo: UploadFile = File(...)):
 
     # --- STEP 2: OCR (only if barcode didn't already give us an answer) ---
     if medicine_id is None:
-        ocr_result = try_ocr_lookup(image)
+        ocr_result = try_ocr_lookup(image, MEDICINES_BY_ID)
         ocr_text_for_expiry = ocr_result["raw_text"]
         if ocr_result["medicine_id"]:
             medicine_id = ocr_result["medicine_id"]
@@ -347,7 +187,7 @@ async def scan_medicine(photo: UploadFile = File(...)):
 
     # --- STEP 3: vision model fallback (only if steps 1 and 2 both failed) ---
     if medicine_id is None:
-        vision_result = try_vision_fallback(image)
+        vision_result = try_vision_fallback(image, _vision_model)
         if vision_result["source"] == "vision":
             fallback_name = vision_result["medicine_name"]
             fallback_purpose_ne = vision_result.get("purpose_ne")
