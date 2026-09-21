@@ -1,111 +1,105 @@
-# Medicine Identifier — Backend
+# Medicine Identifier
 
-This is the "brain" of the app: it takes a photo of a medicine (sent by the
-frontend) and tries to identify what it is and when it expires, using three
-steps in order — barcode, then OCR, then an AI vision model as a fallback.
+A web app to help people (especially elderly, non-English-speaking users in
+rural Nepal) identify a medicine and its expiry date just by photographing
+it - like Google Lens, but for medicine boxes and strips.
+
+The UI is in Nepali by default, with a one-tap toggle to English. Text is
+large and the layout is high-contrast, designed for older users.
 
 ## Project structure
 
 ```
-backend/
-  main.py             The FastAPI app - the "conductor". Wires the steps
-                       together and exposes the /scan and /health endpoints.
-  ocr.py               STEP 2: reads printed text off the packaging and
-                       matches it against known medicines.
-  vision_fallback.py   STEP 3: asks an AI vision model to look at the photo
-                       directly, when barcode + OCR both fail.
-  expiry_parser.py     Finds expiry-date text near keywords like "EXP" or
-                       "म्याद", independent of which step IDs the medicine.
-  medicine_db.json     Small local database: medicine names, Nepali/English
-                       descriptions, and known barcodes. Meant to grow.
-  requirements.txt     Python package dependencies.
-  .env.example          Shows which environment variable names the app
-                       expects (currently just GEMINI_API_KEY). Copy this
-                       to ".env" and fill in real values there.
+medicine-identifier/
+  frontend/    Next.js web app - camera, barcode scan, Nepali/English UI
+  backend/     FastAPI server - identifies the medicine (barcode -> OCR ->
+               AI vision fallback) and finds its expiry date
 ```
 
-## How the /scan endpoint works
+Each folder has its own more detailed README (`frontend/README.md`,
+`backend/README.md`) - this file is the "start here" overview covering how
+to run BOTH together.
 
-1. **Barcode** — look for a barcode in the photo. If found and it's in
-   `medicine_db.json`, that's the answer.
-2. **OCR** — if no barcode (or an unrecognized one), read the printed text
-   (Nepali + English) and try to match it against known medicine names.
-3. **Vision model fallback** — if OCR didn't confidently match anything,
-   send the photo itself to a vision-capable AI model and ask it to
-   identify the medicine directly. Needs internet + a free Gemini API key.
-4. **Expiry date** — searched for throughout, regardless of which step
-   above identified the medicine.
+## Current status
 
-Every response includes `"needs_user_confirmation": true` — the app is
-designed so a guess from ANY step is always shown to the user for a
-✅/❌ confirmation, never treated as final on its own. See
-`expiry_raw_text` in the response too — it's returned as raw text exactly
-as found, not silently auto-converted, for the same reason.
+The frontend and backend both work on their own, but are **not yet wired
+together** - capturing a photo currently just shows it back to you as a
+placeholder, instead of actually sending it to the backend for
+identification. That connection is the next planned step.
 
-## Setup
+## How to run the whole project
 
-### 1. System-level tools (not Python packages — install separately)
+You need **two terminal windows open at the same time** - one for the
+backend, one for the frontend. Closing either terminal stops that half of
+the app.
+
+### Terminal 1 - Backend
 
 ```bash
+cd backend
+
+# One-time setup (skip if already done):
 sudo apt install tesseract-ocr tesseract-ocr-nep libzbar0
-```
-
-- `tesseract-ocr` + `tesseract-ocr-nep` — the actual OCR engine, plus the
-  Nepali (Devanagari) language pack it needs to read Nepali text.
-- `libzbar0` — required by the `pyzbar` barcode-reading library.
-
-### 2. Python packages
-
-It's a good idea to use a virtual environment so these packages don't mix
-with other Python projects on your machine:
-
-```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-```
-
-### 3. Environment variables
-
-```bash
 cp .env.example .env
-```
+# open .env and add your Gemini API key (optional - see backend/README.md)
 
-Then open `.env` and fill in a real `GEMINI_API_KEY` (get one free at
-https://aistudio.google.com/app/apikey — check that page for current
-free-tier limits, since they can change). This step is optional — the
-app still runs and answers via barcode/OCR without it, it just can't use
-the Step 3 vision fallback.
-
-### 4. Run the server
-
-```bash
+# Every time you want to run it:
+source venv/bin/activate
 uvicorn main:app --reload --port 8000
 ```
 
-`--reload` makes it restart automatically whenever you save a code
-change, which is convenient while developing. Once running, you can check
-it's alive by opening `http://localhost:8000/health` in a browser — it
-should show `{"status": "ok"}`.
+Confirm it's running by opening `http://localhost:8000/health` in a
+browser - it should show `{"status":"ok"}`.
 
-The frontend's `TODO (backend step)` comments (in `app/page.jsx`) are
-where it should call `http://localhost:8000/scan`.
+### Terminal 2 - Frontend
 
-## Growing `medicine_db.json`
+```bash
+cd frontend
 
-It ships with only 5 sample medicines. To add more:
-- Add an entry under `"medicines"` with an id, brand names, generic name,
-  and Nepali/English descriptions.
-- If you know the medicine's barcode, add it under `"by_barcode"`,
-  mapping the barcode number to that medicine's id.
+# One-time setup (skip if already done):
+npm install
 
-## What's intentionally NOT built yet (future work)
+# Every time you want to run it:
+npm run dev
+```
 
-- Training a custom image-classification model on common packaging
-  (once enough confirmed/corrected scans have been collected).
-- Offline support (everything currently requires internet for Step 3, and
-  Tesseract itself needs to be installed locally either way).
-- Audio (Nepali text-to-speech) output.
-- Bikram Sambat calendar support for expiry dates.
-- Logging user corrections (✅/❌ confirmations) to build a growing,
-  verified dataset over time.
+Then open `http://localhost:3000` in a browser (or on your phone, once
+deployed) - that's the actual app.
+
+### Stopping everything
+
+In each terminal, press `Ctrl+C` to stop that server.
+
+## Full setup details
+
+- Backend setup, troubleshooting, and how `/scan` works internally:
+  see `backend/README.md`.
+- Frontend setup and what's built so far: see `frontend/README.md`.
+
+## What's built so far
+
+**Frontend:**
+- Camera capture with live barcode scanning
+- Photo capture / gallery upload fallback
+- Nepali-first UI with an English toggle button
+- Large fonts, bright/high-contrast design for elderly users
+
+**Backend:**
+- `/scan` endpoint: barcode lookup -> OCR (Nepali + English) -> AI vision
+  model fallback, in that order
+- Expiry-date text detection, independent of which step IDs the medicine
+- A small, growable local medicine database
+
+## What's next / future work
+
+- Connect the frontend's photo capture to the backend's `/scan` endpoint
+  (currently a placeholder screen)
+- Build the result/confirmation screen: cropped image + big ✅/❌ buttons
+  so users confirm or correct the guess, rather than trusting it blindly
+- Grow `medicine_db.json` with more real medicines and barcodes
+- Train a custom image-classification model from confirmed/corrected scans
+- Offline support, audio (Nepali text-to-speech) output, Bikram Sambat
+  calendar support for expiry dates
