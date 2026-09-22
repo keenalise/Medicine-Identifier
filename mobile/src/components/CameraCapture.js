@@ -17,7 +17,7 @@
 // its own screen state.
 // ============================================================================
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
@@ -41,21 +41,38 @@ export default function CameraCapture({ onBarcodeFound, onPhotoCaptured }) {
   // onBarcodeFound could fire repeatedly per second while the camera
   // keeps looking at the same barcode).
   const [hasScannedBarcode, setHasScannedBarcode] = useState(false);
+  const hasScannedBarcodeRef = useRef(false);
 
   function handleBarcodeScanned(result) {
     if (hasScannedBarcode) return; // already handled one, ignore further scans
+    hasScannedBarcodeRef.current = true;
     setHasScannedBarcode(true);
     onBarcodeFound(result.data);
   }
 
   async function handleTakePhoto() {
     if (!cameraRef.current) return;
+    // Taking a photo while the barcode scanner is still actively watching
+  // the camera feed can fail on some devices ("Failed to capture
+  // image") - stopping barcode scanning first, right before capturing,
+  // avoids that conflict.
+  hasScannedBarcodeRef.current = true;
+  setHasScannedBarcode(true);
+
+  try {
     // Takes a still photo from the current camera view. `quality: 0.8`
     // keeps the file size reasonable for uploading over mobile data,
     // while still being clear enough to read text off a medicine label.
     const photo = await cameraRef.current.takePictureAsync({ quality: 0.8 });
     onPhotoCaptured(photo.uri);
+  } catch (error) {
+    // The camera can genuinely fail to capture (not fully ready yet, or
+    // a device-specific quirk) - catching this means the user sees
+    // nothing happen and can just tap the button again, instead of the
+    // app crashing with a raw error screen.
+    console.warn("Camera capture failed, user can retry:", error);
   }
+}
 
   async function handleUploadFromGallery() {
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -66,6 +83,25 @@ export default function CameraCapture({ onBarcodeFound, onPhotoCaptured }) {
       onPhotoCaptured(result.assets[0].uri);
     }
   }
+
+
+  // If no barcode is found within a few seconds, automatically move on
+  // to taking a photo instead of leaving the user stuck watching
+  // "looking for a barcode" forever - many medicines don't have one.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (!hasScannedBarcodeRef.current) {
+        setHasScannedBarcode(true);
+        handleTakePhoto();
+      }
+    }, 5000);
+
+    return () => clearTimeout(timer);
+  }, []);
+
+
+
+
 
   // --- Permission not yet decided, or explicitly denied ---
   if (!permission) {

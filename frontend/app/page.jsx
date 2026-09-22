@@ -4,16 +4,18 @@
 // app/page.jsx
 //
 // WHAT THIS FILE DOES (in plain words):
-// This is the very first screen the user sees. It shows:
+// This is the home screen. It shows:
 //   1. A bright header with the app name and the language toggle button.
-//   2. Either the camera screen (default), or a simple "here's what we
-//      captured" screen after a photo is taken / a barcode is found.
+//   2. The camera screen (default).
+//   3. A "loading" screen while the photo is being sent to the backend
+//      and identified.
+//   4. A result screen showing what the backend found - medicine name,
+//      what it's for, and the expiry date - with big ✅/❌ buttons so the
+//      user confirms it themselves rather than trusting a guess blindly.
 //
-// NOTE FOR NEXT STEP: The backend (which actually identifies the medicine
-// from the barcode/photo) doesn't exist yet - we're building the frontend
-// first, as agreed. So for now, capturing a barcode or photo just moves to
-// a placeholder "captured!" screen. The spots where the backend call will
-// go are clearly marked with TODO comments below.
+// This is where the frontend finally talks to the backend's /scan
+// endpoint - the TODO comments from earlier versions of this file are now
+// filled in.
 // ============================================================================
 
 import { useState } from "react";
@@ -21,38 +23,76 @@ import CameraCapture from "../components/CameraCapture";
 import LanguageToggle from "../components/LanguageToggle";
 import { useLanguage } from "../lib/LanguageContext";
 
+// The backend's address during local development. Later, when this app is
+// deployed somewhere real, this should come from an environment variable
+// instead of being hardcoded - but for testing on your own machine, this
+// is correct as-is.
+const BACKEND_URL = "http://localhost:8000";
+
+// What screen we're showing, and any data that screen needs:
+//   { type: "none" }                       - camera screen
+//   { type: "loading" }                    - waiting for the backend
+//   { type: "result", photoUrl, data }      - backend responded
+//   { type: "error" }                       - something went wrong
+
 export default function HomePage() {
-  const { text } = useLanguage();
-  // `capture` tracks what we have captured so far, before the backend has
-  // processed it: { type: "none" } | { type: "barcode", value } |
-  // { type: "photo", photoUrl }
+  const { text, language } = useLanguage();
   const [capture, setCapture] = useState({ type: "none" });
 
-  function handleBarcodeFound(barcodeText) {
-    // TODO (backend step): send `barcodeText` to the /scan backend
-    // endpoint to look up the medicine by barcode. For now we just record
-    // it so the screen can show something happened.
-    setCapture({ type: "barcode", value: barcodeText });
+  // Called when a barcode is detected live by the camera. The actual
+  // identification now happens via the photo sent in handlePhotoCaptured
+  // (CameraCapture.jsx also grabs a still photo the moment a barcode is
+  // found), so this just needs to exist - it doesn't need to do anything
+  // itself.
+  function handleBarcodeFound(_barcodeText) {
+    // Intentionally empty - see comment above.
   }
 
-  function handlePhotoCaptured(photo) {
-    // TODO (backend step): send `photo` (as a file) to the /scan backend
-    // endpoint, which will run OCR and, if needed, the vision-model
-    // fallback. For now we just show the captured photo back to the user
-    // so they can see the capture worked.
+  async function handlePhotoCaptured(photo) {
+    setCapture({ type: "loading" });
     const photoUrl = URL.createObjectURL(photo);
-    setCapture({ type: "photo", photoUrl });
+
+    // Package the photo as a file upload, matching what the backend's
+    // /scan endpoint expects (a form field named "photo").
+    const formData = new FormData();
+    formData.append("photo", photo, "medicine.jpg");
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/scan`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Backend responded with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      setCapture({ type: "result", photoUrl, data });
+    } catch (error) {
+      // Common causes: the backend isn't running, or there's no internet
+      // connection (needed for the vision-model fallback step). Either
+      // way, we tell the user plainly rather than leaving them staring
+      // at a spinner forever.
+      console.error("Scan request failed:", error);
+      setCapture({ type: "error" });
+    }
   }
 
   function handleReset() {
     setCapture({ type: "none" });
   }
 
+  function handleConfirmation(wasCorrect) {
+    // TODO (future step): send this confirmation/correction back to the
+    // backend so it can be logged and used to grow medicine_db.json and
+    // eventually train the image-classification model, as planned.
+    console.log("User confirmed result was correct:", wasCorrect);
+    handleReset();
+  }
+
   return (
     <main style={{ minHeight: "100vh", background: "var(--color-surface)" }}>
-      {/* Bright hero header - the "bright colored background" the project
-          asked for, contained to the header so body text stays easy to
-          read against a plain surface underneath. */}
       <header
         style={{
           background:
@@ -96,38 +136,127 @@ export default function HomePage() {
           </>
         )}
 
-        {capture.type === "barcode" && (
+        {capture.type === "loading" && (
+          <p style={{ fontSize: "var(--font-size-body)" }}>
+            {text.scanningOcrVision}
+          </p>
+        )}
+
+        {capture.type === "error" && (
           <div>
-            <p style={{ fontSize: "var(--font-size-body)" }}>
-              {/* Placeholder until the backend lookup exists */}
-              Barcode captured: {capture.value}
+            <p style={{ fontSize: "var(--font-size-body)", color: "var(--color-danger)" }}>
+              {text.errorGeneric}
             </p>
             <ResetButton onClick={handleReset} label={text.tryAgainButton} />
           </div>
         )}
 
-        {capture.type === "photo" && (
-          <div>
-            <img
-              src={capture.photoUrl}
-              alt="Captured medicine"
-              style={{
-                width: "100%",
-                maxWidth: "480px",
-                borderRadius: "var(--radius-large)",
-              }}
-            />
-            <ResetButton onClick={handleReset} label={text.tryAgainButton} />
-          </div>
+        {capture.type === "result" && (
+          <ResultScreen
+            photoUrl={capture.photoUrl}
+            data={capture.data}
+            text={text}
+            language={language}
+            onConfirm={() => handleConfirmation(true)}
+            onReject={() => handleConfirmation(false)}
+          />
         )}
       </section>
     </main>
   );
 }
 
-// A small reusable "try again" button, shown on the placeholder result
-// screens above. Kept as its own tiny component since it's used in two
-// places with identical styling.
+// The screen shown after the backend responds: the photo, what it found,
+// and the big confirm/reject buttons - never presenting a guess as final
+// on its own.
+function ResultScreen({ photoUrl, data, text, language, onConfirm, onReject }) {
+  // The backend only fills in purpose_en when a local database entry was
+  // matched (not when the vision-model fallback answered) - fall back to
+  // the Nepali text either way rather than showing a blank in English mode.
+  const purposeText =
+    language === "en" && data.purpose_en ? data.purpose_en : data.purpose_ne;
+
+  return (
+    <div>
+      <img
+        src={photoUrl}
+        alt="Captured medicine"
+        style={{
+          width: "100%",
+          maxWidth: "480px",
+          borderRadius: "var(--radius-large)",
+        }}
+      />
+
+      {data.identified ? (
+        <div style={{ marginTop: "20px" }}>
+          <p style={{ fontSize: "var(--font-size-heading)", fontWeight: 700 }}>
+            {data.generic_name}
+          </p>
+
+          {purposeText && (
+            <p style={{ fontSize: "var(--font-size-body)", marginTop: "8px" }}>
+              {text.resultPurposeLabel} {purposeText}
+            </p>
+          )}
+
+          <p style={{ fontSize: "var(--font-size-body)", marginTop: "8px" }}>
+            {text.resultExpiryLabel}{" "}
+            {data.expiry_raw_text || "?"}
+          </p>
+
+          <div
+            style={{
+              display: "flex",
+              gap: "16px",
+              justifyContent: "center",
+              marginTop: "24px",
+            }}
+          >
+            <button
+              onClick={onConfirm}
+              style={{
+                minHeight: "var(--touch-target-min)",
+                padding: "0 28px",
+                fontSize: "var(--font-size-button)",
+                fontWeight: 700,
+                color: "var(--color-text-on-primary)",
+                background: "var(--color-success)",
+                border: "none",
+                borderRadius: "var(--radius-large)",
+              }}
+            >
+              {text.confirmCorrectButton}
+            </button>
+            <button
+              onClick={onReject}
+              style={{
+                minHeight: "var(--touch-target-min)",
+                padding: "0 28px",
+                fontSize: "var(--font-size-button)",
+                fontWeight: 700,
+                color: "var(--color-text-on-primary)",
+                background: "var(--color-danger)",
+                border: "none",
+                borderRadius: "var(--radius-large)",
+              }}
+            >
+              {text.confirmWrongButton}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div style={{ marginTop: "20px" }}>
+          <p style={{ fontSize: "var(--font-size-body)" }}>
+            {text.scanningFailedRetry}
+          </p>
+          <ResetButton onClick={onReject} label={text.tryAgainButton} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ResetButton({ onClick, label }) {
   return (
     <button
