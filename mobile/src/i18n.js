@@ -1,0 +1,79 @@
+// ============================================================================
+// src/i18n.js
+//
+// WHAT THIS FILE DOES (in plain words):
+// This is the "phrase book" for the whole app - the same idea as the web
+// version's lib/i18n.js. Every piece of text the user sees exists here in
+// BOTH Nepali ("ne") and English ("en"), so the language-toggle button has
+// one single place to switch text from, instead of text being scattered
+// across every screen.
+//
+// This file is intentionally kept word-for-word the same as the web app's
+// phrase book, so both apps show identical text to users.
+// ============================================================================
+
+const ne = {
+  appName: "औषधि चिनुहोस्",
+  toggleButtonLabel: "English",
+
+  homeHeading: "औषधिको फोटो खिच्नुहोस्",
+  homeSubheading: "औषधिको बट्टा वा पत्ता क्यामेरा अगाडि राख्नुहोस्",
+  takePhotoButton: "फोटो खिच्नुहोस्",
+  uploadFromGalleryButton: "ग्यालरीबाट छान्नुहोस्",
+
+  scanningBarcode: "बारकोड खोजिँदैछ...",
+  scanningOcrVision: "औषधि पहिचान गरिँदैछ...",
+  scanningFailedRetry: "पत्ता लगाउन सकिएन, फेरि प्रयास गर्नुहोस्",
+
+  resultPurposeLabel: "यो औषधि यसको लागि हो:",
+  resultExpiryLabel: "म्याद सकिने मिति:",
+  resultExpiredWarning: "⚠️ यो औषधिको म्याद सकिसक्यो, प्रयोग नगर्नुहोस्",
+  confirmCorrectButton: "✅ ठीक छ",
+  confirmWrongButton: "❌ मिलेन",
+
+  correctionPromptExpiry: "सही मिति छान्नुहोस्",
+  correctionPromptName: "सही औषधिको नाम छान्नुहोस्",
+  correctionSaveButton: "सुरक्षित गर्नुहोस्",
+
+  errorNoInternet: "इन्टरनेट जडान छैन",
+  errorGeneric: "समस्या भयो, फेरि प्रयास गर्नुहोस्",
+  tryAgainButton: "फेरि प्रयास गर्नुहोस्",
+
+  // Mobile-only text: the camera permission screen, which the web version
+  // doesn't need (browsers handle that prompt themselves).
+  cameraPermissionMessage: "फोटो खिच्नको लागि क्यामेरा प्रयोग गर्ने अनुमति चाहिन्छ",
+  cameraPermissionButton: "अनुमति दिनुहोस्",
+};
+
+const en = {
+  appName: "Identify Medicine",
+  toggleButtonLabel: "नेपाली",
+
+  homeHeading: "Take a photo of the medicine",
+  homeSubheading: "Hold the medicine box or strip in front of the camera",
+  takePhotoButton: "Take Photo",
+  uploadFromGalleryButton: "Choose from Gallery",
+
+  scanningBarcode: "Looking for a barcode...",
+  scanningOcrVision: "Identifying the medicine...",
+  scanningFailedRetry: "Could not identify it, please try again",
+
+  resultPurposeLabel: "This medicine is for:",
+  resultExpiryLabel: "Expiry date:",
+  resultExpiredWarning: "⚠️ This medicine has expired, do not use it",
+  confirmCorrectButton: "✅ Correct",
+  confirmWrongButton: "❌ Not right",
+
+  correctionPromptExpiry: "Please pick the correct expiry date",
+  correctionPromptName: "Please pick the correct medicine",
+  correctionSaveButton: "Save",
+
+  errorNoInternet: "No internet connection",
+  errorGeneric: "Something went wrong, please try again",
+  tryAgainButton: "Try Again",
+
+  cameraPermissionMessage: "Camera access is needed to take a photo",
+  cameraPermissionButton: "Grant Permission",
+};
+
+export const dictionaries = { ne, en };

@@ -1,0 +1,24 @@
+{
+  "name": "mobile",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "@expo-google-fonts/baloo-2": "^0.4.2",
+    "expo": "~57.0.24",
+    "expo-camera": "^57.0.5",
+    "expo-font": "^57.0.4",
+    "expo-image-picker": "^57.0.19",
+    "expo-linear-gradient": "^57.0.2",
+    "expo-splash-screen": "^57.0.9",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web"
+  },
+  "private": true
+}
