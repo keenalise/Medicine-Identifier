@@ -38,6 +38,7 @@ export default function CameraCapture({ onBarcodeFound, onPhotoCaptured }) {
   // (start the camera, grab a frame) the way plain JavaScript would.
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const barcodeFoundRef = useRef(false);
 
   // Tracks whether we are still actively looking for a barcode, so we can
   // show the "Looking for a barcode..." message and stop it later.
@@ -68,8 +69,10 @@ export default function CameraCapture({ onBarcodeFound, onPhotoCaptured }) {
             if (result) {
               // A barcode was successfully read! Stop scanning and hand
               // the result up to the parent screen.
+              barcodeFoundRef.current = true;
               setIsScanningBarcode(false);
               onBarcodeFound(result.getText());
+              handleTakePhoto(); // also capture a frame so it can be sent to the backend
             }
             // Note: `error` fires constantly too (it just means "no
             // barcode visible in THIS particular frame"), so we
@@ -95,6 +98,24 @@ export default function CameraCapture({ onBarcodeFound, onPhotoCaptured }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+
+  // If no barcode is found within a few seconds, don't leave the user
+  // stuck on "looking for a barcode" forever - automatically move on to
+  // taking a photo instead, same as if they'd pressed the button
+  // themselves. Many medicines simply don't have a scannable barcode.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (!barcodeFoundRef.current) {
+        setIsScanningBarcode(false);
+        handleTakePhoto();
+      }
+    }, 5000);
+
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
 
   // Called when the user presses the big "Take Photo" button - used when
   // no barcode was found, or the medicine doesn't have one.
