@@ -8,11 +8,14 @@
 //
 // Why keep all the text in one place instead of writing it directly inside
 // each screen? Because the app has an "English" toggle button that must
-// switch EVERY piece of text on the page at once. If the text were scattered
-// across many files, the toggle button would have no easy way to find and
-// swap it all. By keeping every phrase here, the toggle button just has to
-// say "use the 'ne' column" or "use the 'en' column", and every screen
-// automatically shows the right language.
+// switch EVERY piece of text on the page at once. By keeping every phrase
+// here, the toggle button just has to say "use the 'ne' column" or "use the
+// 'en' column", and every screen automatically shows the right language.
+//
+// NEW in this version: camera messages (cameraStarting, cameraErrorDenied,
+// cameraErrorNotFound, cameraErrorInUse, cameraErrorInsecure), used by
+// components/CameraCapture.jsx. Every key exists in BOTH languages - if a
+// key is missing from one, that screen shows nothing in that language.
 // ============================================================================
 
 // The Nepali phrase book. This is the DEFAULT language the app opens in,
@@ -26,6 +29,16 @@ const ne = {
   homeSubheading: "औषधिको बट्टा वा पत्ता क्यामेरा अगाडि राख्नुहोस्",
   takePhotoButton: "फोटो खिच्नुहोस्",
   uploadFromGalleryButton: "ग्यालरीबाट छान्नुहोस्",
+
+  cameraStarting: "क्यामेरा खुल्दैछ...",
+  cameraErrorDenied:
+    "क्यामेराको अनुमति दिइएको छैन। ब्राउजरको सेटिङमा गएर क्यामेरा प्रयोग गर्न अनुमति दिनुहोस्, वा तलबाट ग्यालरीबाट फोटो छान्नुहोस्",
+  cameraErrorNotFound:
+    "क्यामेरा भेटिएन। तलबाट ग्यालरीबाट फोटो छान्न सक्नुहुन्छ",
+  cameraErrorInUse:
+    "क्यामेरा अर्को एपले प्रयोग गरिरहेको छ। त्यो बन्द गरेर फेरि प्रयास गर्नुहोस्",
+  cameraErrorInsecure:
+    "क्यामेरा चल्न सुरक्षित (https) जडान वा localhost चाहिन्छ। तलबाट ग्यालरीबाट फोटो छान्नुहोस्",
 
   scanningBarcode: "बारकोड खोजिँदैछ...",
   scanningOcrVision: "औषधि पहिचान गरिँदैछ...",
@@ -55,6 +68,16 @@ const en = {
   homeSubheading: "Hold the medicine box or strip in front of the camera",
   takePhotoButton: "Take Photo",
   uploadFromGalleryButton: "Choose from Gallery",
+
+  cameraStarting: "Starting the camera...",
+  cameraErrorDenied:
+    "Camera permission was denied. Please allow camera access in your browser settings, or choose a photo from the gallery below.",
+  cameraErrorNotFound:
+    "No camera was found. You can choose a photo from the gallery below.",
+  cameraErrorInUse:
+    "The camera is being used by another app. Please close it and try again.",
+  cameraErrorInsecure:
+    "The camera only works on a secure (https) connection or on localhost. You can choose a photo from the gallery below.",
 
   scanningBarcode: "Looking for a barcode...",
   scanningOcrVision: "Identifying the medicine...",
