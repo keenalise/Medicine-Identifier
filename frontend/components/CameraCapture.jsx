@@ -4,156 +4,196 @@
 // components/CameraCapture.jsx
 //
 // WHAT THIS FILE DOES (in plain words):
-// This component turns on the phone/laptop camera and shows a live preview.
-// While the camera is running, it constantly checks the video for a
-// barcode (the striped pattern printed on many medicine boxes). This
-// matches the plan: "try the barcode first, since it's the fastest and
-// most reliable way to identify a medicine if one is printed."
+// Turns on the phone/laptop camera, shows a live preview, and watches the
+// video for a barcode. If a barcode is found, or the user presses "Take
+// Photo" (or a few seconds pass with no barcode), a still photo is grabbed
+// and handed to the parent screen so it can be sent to the backend.
 //
-// If a barcode IS found -> we immediately tell the parent screen via the
-//   onBarcodeFound callback, and stop using the camera.
-// If the user instead presses "Take Photo" (because no barcode was found,
-//   or the box doesn't have one) -> we grab a single still image from the
-//   video and hand it to the parent via onPhotoCaptured, so it can be sent
-//   for OCR / vision-based identification instead.
+// There is also a plain "choose from gallery" upload, which keeps working
+// even when the camera cannot start.
 //
-// There is also a plain file-upload fallback, for:
-//   - Desktop testing/development where a webcam may behave differently.
-//   - Users who prefer picking an existing photo from their gallery.
-//
-// Props this component expects:
+// Props:
 //   onBarcodeFound(barcodeText)  - called the moment a barcode is read
 //   onPhotoCaptured(photoBlob)   - called when a still photo is taken/uploaded
+//
+// WHAT CHANGED vs. THE PREVIOUS VERSION (why the camera wouldn't start):
+//   1. React dev mode (Strict Mode) starts and stops every effect twice.
+//      The old code started the camera twice on the SAME <video> element,
+//      and the first start could never be stopped, leaving a black screen.
+//      Now the start is delayed by one tick so only the real one runs, and
+//      a camera that finishes starting after we were closed is stopped.
+//   2. The old 5-second auto-photo timer began at page load, even while the
+//      browser was still asking for camera permission (video size 0), so
+//      the photo was empty/failed. The timer now begins only once the
+//      camera is really running.
+//   3. After a barcode was read, the old code kept firing on every video
+//      frame, sending many photos. Now it fires once.
+//   4. Errors are now specific (permission denied / no camera / camera in
+//      use / not a secure connection) and are shown in the current
+//      language, instead of one generic message that never changed language.
 // ============================================================================
 
 import { useEffect, useRef, useState } from "react";
 import { BrowserMultiFormatReader } from "@zxing/browser";
 import { useLanguage } from "../lib/LanguageContext";
 
+// If no barcode is found this many milliseconds after the camera starts,
+// a photo is taken automatically. Set to 0 to turn auto-photo off and
+// only take a photo when the user presses the button.
+const AUTO_PHOTO_DELAY_MS = 5000;
+
+// Which phrase (in lib/i18n.js) to show for each kind of camera problem.
+const ERROR_TEXT_KEYS = {
+  insecure: "cameraErrorInsecure",
+  denied: "cameraErrorDenied",
+  notFound: "cameraErrorNotFound",
+  inUse: "cameraErrorInUse",
+  generic: "errorGeneric",
+};
+
+// Turns the browser's technical error into one of the kinds above.
+function errorKindFor(err) {
+  const name = err?.name;
+  if (name === "NotAllowedError" || name === "SecurityError") return "denied";
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") return "notFound";
+  if (name === "NotReadableError" || name === "TrackStartError") return "inUse";
+  return "generic";
+}
+
 export default function CameraCapture({ onBarcodeFound, onPhotoCaptured }) {
   const { text } = useLanguage();
 
-  // A "ref" here is just a stable handle to the actual <video> and
-  // <canvas> HTML elements on the page, so we can control them directly
-  // (start the camera, grab a frame) the way plain JavaScript would.
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const barcodeFoundRef = useRef(false);
+  const photoSentRef = useRef(false);
 
-  // Tracks whether we are still actively looking for a barcode, so we can
-  // show the "Looking for a barcode..." message and stop it later.
+  // Always hold the LATEST callbacks, so the long-running camera code
+  // below never calls an out-of-date copy of them.
+  const onBarcodeFoundRef = useRef(onBarcodeFound);
+  const onPhotoCapturedRef = useRef(onPhotoCaptured);
+  onBarcodeFoundRef.current = onBarcodeFound;
+  onPhotoCapturedRef.current = onPhotoCaptured;
+
   const [isScanningBarcode, setIsScanningBarcode] = useState(true);
-  const [cameraError, setCameraError] = useState(null);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraErrorKind, setCameraErrorKind] = useState(null);
 
+  // --- Start the camera + barcode scanning ---------------------------------
   useEffect(() => {
-    // This object from the ZXing library does the actual barcode-reading
-    // work: it watches a <video> element frame by frame and tries to
-    // decode any barcode it can see.
-    const barcodeReader = new BrowserMultiFormatReader();
     let isCancelled = false;
     let scannerControls = null;
 
     async function startCameraAndScan() {
-      try {
-        // "environment" asks for the REAR camera on a phone, since that's
-        // the one used to photograph objects (the front camera is for
-        // selfies/video calls).
-        scannerControls = await barcodeReader.decodeFromConstraints(
-          { video: { facingMode: "environment" } },
-          videoRef.current,
-          (result, error) => {
-            // This callback fires repeatedly, many times per second, as
-            // the library keeps scanning new video frames.
-            if (isCancelled) return;
+      // Browsers only allow camera access on https:// or http://localhost.
+      // Opening the app by a network address (e.g. http://192.168.1.5:3000)
+      // makes navigator.mediaDevices undefined.
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setCameraErrorKind(window.isSecureContext ? "generic" : "insecure");
+        return;
+      }
 
-            if (result) {
-              // A barcode was successfully read! Stop scanning and hand
-              // the result up to the parent screen.
-              barcodeFoundRef.current = true;
-              setIsScanningBarcode(false);
-              onBarcodeFound(result.getText());
-              handleTakePhoto(); // also capture a frame so it can be sent to the backend
-            }
-            // Note: `error` fires constantly too (it just means "no
-            // barcode visible in THIS particular frame"), so we
-            // deliberately do nothing with it - that's normal, not a
-            // real problem.
+      const barcodeReader = new BrowserMultiFormatReader();
+      try {
+        const controls = await barcodeReader.decodeFromConstraints(
+          // "ideal" rear camera: uses the back camera on a phone, but
+          // still works on a laptop that only has one webcam.
+          { video: { facingMode: { ideal: "environment" } }, audio: false },
+          videoRef.current,
+          (result) => {
+            // Fires many times per second. "No barcode in this frame" is
+            // normal and ignored; only act on the first real result.
+            if (isCancelled || !result || barcodeFoundRef.current) return;
+
+            barcodeFoundRef.current = true;
+            setIsScanningBarcode(false);
+            onBarcodeFoundRef.current(result.getText());
+            takePhoto(); // also send a still frame to the backend
           }
         );
+
+        if (isCancelled) {
+          // We were closed while the camera was still starting: release it.
+          controls.stop();
+          return;
+        }
+        scannerControls = controls;
+        setCameraReady(true);
       } catch (err) {
-        // This happens if the browser/device refuses camera access, e.g.
-        // the user denied the permission prompt.
-        setCameraError(text.errorGeneric);
+        if (isCancelled) return;
+        console.error("Camera failed to start:", err);
+        setCameraErrorKind(errorKindFor(err));
       }
     }
 
-    startCameraAndScan();
+    // Wait one tick before starting. In React dev mode this effect is run,
+    // immediately cleaned up, and run again - clearing the timer means only
+    // the second (real) run actually opens the camera.
+    const startTimer = setTimeout(startCameraAndScan, 0);
 
-    // Cleanup: when this component is no longer shown (user navigated
-    // away), make sure we release the camera. Leaving a camera running in
-    // the background would drain battery and is a privacy concern.
     return () => {
       isCancelled = true;
-      scannerControls?.stop();
+      clearTimeout(startTimer);
+      scannerControls?.stop(); // release the camera when leaving the screen
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-
-  // If no barcode is found within a few seconds, don't leave the user
-  // stuck on "looking for a barcode" forever - automatically move on to
-  // taking a photo instead, same as if they'd pressed the button
-  // themselves. Many medicines simply don't have a scannable barcode.
+  // --- Auto-photo if no barcode is found -----------------------------------
   useEffect(() => {
+    if (!cameraReady || !AUTO_PHOTO_DELAY_MS) return;
+
     const timer = setTimeout(() => {
       if (!barcodeFoundRef.current) {
         setIsScanningBarcode(false);
-        handleTakePhoto();
+        takePhoto();
       }
-    }, 5000);
+    }, AUTO_PHOTO_DELAY_MS);
 
     return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [cameraReady]);
 
+  // --- Grab one still photo from the live video ----------------------------
+  function takePhoto() {
+    if (photoSentRef.current) return; // never send two photos
 
-  // Called when the user presses the big "Take Photo" button - used when
-  // no barcode was found, or the medicine doesn't have one.
-  function handleTakePhoto() {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!video || !canvas) return;
+    // videoWidth is 0 until the camera is really delivering frames.
+    if (!video || !canvas || !video.videoWidth) return;
 
-    // Draw the CURRENT video frame onto the (invisible) canvas, matching
-    // the video's real resolution so we don't lose image quality.
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-    const context = canvas.getContext("2d");
-    context?.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.getContext("2d")?.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    // Convert that canvas drawing into an actual image file (a Blob) we
-    // can later send to the backend, the same way a photo file works.
-    canvas.toBlob((blob) => {
-      if (blob) onPhotoCaptured(blob);
-    }, "image/jpeg");
+    photoSentRef.current = true;
+    canvas.toBlob(
+      (blob) => {
+        if (blob) {
+          onPhotoCapturedRef.current(blob);
+        } else {
+          photoSentRef.current = false; // failed - allow another try
+        }
+      },
+      "image/jpeg",
+      0.92
+    );
   }
 
-  // Called when the user picks an existing photo from their gallery
-  // instead of using the live camera.
+  // Photo picked from the gallery instead of the live camera.
   function handleFileUpload(event) {
     const file = event.target.files?.[0];
-    if (file) onPhotoCaptured(file);
+    if (file) onPhotoCapturedRef.current(file);
   }
 
-    return (
+  return (
     <div style={{ width: "100%", textAlign: "center" }}>
-      {cameraError && (
+      {cameraErrorKind && (
         <p style={{ color: "var(--color-danger)", marginBottom: "16px" }}>
-          {cameraError}
+          {text[ERROR_TEXT_KEYS[cameraErrorKind]]}
         </p>
       )}
 
-      {!cameraError && (
+      {!cameraErrorKind && (
         <>
           {/* Live camera preview */}
           <video
@@ -166,14 +206,20 @@ export default function CameraCapture({ onBarcodeFound, onPhotoCaptured }) {
               maxWidth: "480px",
               borderRadius: "var(--radius-large)",
               background: "#000",
+              minHeight: "240px",
             }}
           />
           <p style={{ fontSize: "var(--font-size-label)", marginTop: "12px" }}>
-            {isScanningBarcode ? text.scanningBarcode : text.scanningOcrVision}
+            {!cameraReady
+              ? text.cameraStarting
+              : isScanningBarcode
+                ? text.scanningBarcode
+                : text.scanningOcrVision}
           </p>
 
           <button
-            onClick={handleTakePhoto}
+            onClick={takePhoto}
+            disabled={!cameraReady}
             style={{
               width: "100%",
               maxWidth: "480px",
@@ -185,6 +231,7 @@ export default function CameraCapture({ onBarcodeFound, onPhotoCaptured }) {
               border: "none",
               borderRadius: "var(--radius-large)",
               marginTop: "16px",
+              opacity: cameraReady ? 1 : 0.5,
             }}
           >
             {text.takePhotoButton}
@@ -192,13 +239,11 @@ export default function CameraCapture({ onBarcodeFound, onPhotoCaptured }) {
         </>
       )}
 
-      {/* Hidden canvas - always present so handleTakePhoto can use it
-          whenever the camera IS working. */}
+      {/* Hidden canvas used to grab the still photo. */}
       <canvas ref={canvasRef} style={{ display: "none" }} />
 
       {/* Upload-from-gallery is always available, even if the camera
-          failed to start (denied permission, no webcam, etc.) - it's
-          the fallback path, not just a convenience. */}
+          failed to start - it's the fallback path. */}
       <label
         style={{
           display: "block",
@@ -206,6 +251,7 @@ export default function CameraCapture({ onBarcodeFound, onPhotoCaptured }) {
           fontSize: "var(--font-size-label)",
           textDecoration: "underline",
           color: "var(--color-text)",
+          cursor: "pointer",
         }}
       >
         {text.uploadFromGalleryButton}
