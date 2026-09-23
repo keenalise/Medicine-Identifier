@@ -170,6 +170,7 @@ async def scan_medicine(photo: UploadFile = File(...)):
     fallback_name = None  # used when the vision model names a medicine
     fallback_purpose_ne = None  # used when the vision model describes it
     ocr_text_for_expiry = ""  # whatever text we gather along the way
+    vision_expiry = ""
 
     # --- STEP 1: barcode ---
     barcode_result = try_barcode_lookup(image)
@@ -177,13 +178,12 @@ async def scan_medicine(photo: UploadFile = File(...)):
         medicine_id = barcode_result["medicine_id"]
         identification_source = "barcode"
 
-    # --- STEP 2: OCR (only if barcode didn't already give us an answer) ---
-    if medicine_id is None:
-        ocr_result = try_ocr_lookup(image, MEDICINES_BY_ID)
-        ocr_text_for_expiry = ocr_result["raw_text"]
-        if ocr_result["medicine_id"]:
-            medicine_id = ocr_result["medicine_id"]
-            identification_source = "ocr"
+    # --- STEP 2: OCR (always run, so we can read the expiry date) ---
+    ocr_result = try_ocr_lookup(image, MEDICINES_BY_ID)
+    ocr_text_for_expiry = ocr_result["raw_text"]
+    if medicine_id is None and ocr_result["medicine_id"]:
+        medicine_id = ocr_result["medicine_id"]
+        identification_source = "ocr"
 
     # --- STEP 3: vision model fallback (only if steps 1 and 2 both failed) ---
     if medicine_id is None:
@@ -195,9 +195,10 @@ async def scan_medicine(photo: UploadFile = File(...)):
             # The vision model might have found expiry text where OCR
             # didn't - fold it in so we still try to parse it below.
             ocr_text_for_expiry += "\n" + vision_result.get("raw_text", "")
+            vision_expiry = vision_result.get("raw_text", "")  
 
     # --- Expiry date: attempt regardless of which step identified the medicine ---
-    expiry_raw_text = find_expiry_text(ocr_text_for_expiry)
+    expiry_raw_text = find_expiry_text(ocr_text_for_expiry) or vision_expiry or None
 
     # --- Build the final answer ---
     if medicine_id:
