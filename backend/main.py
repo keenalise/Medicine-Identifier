@@ -50,8 +50,13 @@ from pyzbar.pyzbar import decode as decode_barcodes
 from dotenv import load_dotenv
 
 from ocr import try_ocr_lookup
-from vision_fallback import create_vision_model, try_vision_fallback
-from expiry_parser import find_expiry_text
+from vision_fallback import (
+    create_vision_model,
+    verify_vision_model,
+    try_vision_fallback,
+    try_extract_expiry_date,
+)
+from expiry_parser import analyze_expiry, format_expiry_in_nepali, is_complete_date
 
 # Loads the GEMINI_API_KEY (and any other secrets) from a local ".env" file,
 # if one exists. See .env.example for what variable names are expected.
@@ -103,10 +108,29 @@ BARCODE_TO_ID.pop("_comment", None)
 # provided. If it wasn't, the app still works - it just can't use Step 3,
 # and will say so honestly instead of crashing. This setup runs ONCE here
 # at server startup - see vision_fallback.py for why that matters.
+#
+# NOTE: since 2026 Google AI Studio only issues the new "AQ..." style Auth
+# keys, which DO work with this setup. verify_vision_model() re-checks the
+# key on every server start and disables Step 3 (never failing a request)
+# if the key or model name is wrong/outdated.
 # ------------------------------------------------------------------------
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 _vision_model = create_vision_model(GEMINI_API_KEY)
+if _vision_model is not None and not verify_vision_model(_vision_model):
+    # The key exists but doesn't actually work (wrong key format, revoked,
+    # quota exhausted...). Detect it ONCE here instead of on every request,
+    # and simply disable Step 3 - exactly as if no key had been provided.
+    _vision_model = None
+
+if _vision_model is not None:
+    print("[vision] Gemini vision model ENABLED - expiry date read with computer vision.")
+else:
+    print(
+        "[vision] Gemini vision model DISABLED - vision model could not be verified. "
+        "Check GEMINI_API_KEY in .env (AI Studio now issues AQ.-style keys, which are "
+        "valid) and confirm the model name in vision_fallback.py still exists."
+    )
 
 
 # ------------------------------------------------------------------------
@@ -168,6 +192,7 @@ async def scan_medicine(photo: UploadFile = File(...)):
     medicine_id = None
     identification_source = None
     fallback_name = None  # used when the vision model names a medicine
+    fallback_name_ne = None  # ditto, in Nepali
     fallback_purpose_ne = None  # used when the vision model describes it
     ocr_text_for_expiry = ""  # whatever text we gather along the way
     vision_expiry = ""
@@ -190,15 +215,55 @@ async def scan_medicine(photo: UploadFile = File(...)):
         vision_result = try_vision_fallback(image, _vision_model)
         if vision_result["source"] == "vision":
             fallback_name = vision_result["medicine_name"]
+            fallback_name_ne = vision_result.get("medicine_name_ne")
             fallback_purpose_ne = vision_result.get("purpose_ne")
             identification_source = "vision"
-            # The vision model might have found expiry text where OCR
-            # didn't - fold it in so we still try to parse it below.
-            ocr_text_for_expiry += "\n" + vision_result.get("raw_text", "")
-            vision_expiry = vision_result.get("raw_text", "")  
+            # The vision model might have read an expiry date where OCR
+            # didn't - keep it around; it's used in the expiry section below.
+            vision_expiry = vision_result.get("raw_text") or ""
 
     # --- Expiry date: attempt regardless of which step identified the medicine ---
-    expiry_raw_text = find_expiry_text(ocr_text_for_expiry) or vision_expiry or None
+    #
+    # OCR often reads the dates on a package but drops the little labels
+    # ("EXP"/"म्याद" vs "Mfg"/"निर्माण"), so it can confuse the
+    # MANUFACTURING date with the EXPIRY date, AND it often chops digits off
+    # the end of a date (e.g. "20 JUNE 2029" -> "21 JUN.2"). The expiry date
+    # is a SENSITIVE field - showing a wrong/half-read date is worse than
+    # showing none - so OCR's answer is only used when it is BOTH:
+    #   - found next to a real expiry keyword, or floating in the text with
+    #     no label at all (never a manufacturing-only date); AND
+    #   - a complete date with a full 2/4-digit year (is_complete_date).
+    # When the date is uncertain, missing, or incomplete AND a vision model
+    # is configured, we ask the model directly - it reads the printed
+    # "Exp./म्याद" label and full date far more reliably than Tesseract.
+    expiry_source, ocr_expiry = analyze_expiry(ocr_text_for_expiry)
+    expiry_raw_text = None
+
+    if vision_expiry:
+        # The STEP-3 vision run already read an expiry date - use it.
+        expiry_raw_text = vision_expiry
+    elif _vision_model is not None and expiry_source != "exp_keyword":
+        expiry_vision = try_extract_expiry_date(image, _vision_model)
+        if expiry_vision.get("expiry_text"):
+            expiry_raw_text = expiry_vision["expiry_text"]
+        elif (
+            expiry_source in ("exp_keyword", "fallback")
+            and is_complete_date(ocr_expiry)
+        ):
+            # The model couldn't answer (offline/rate limit) - fall back to
+            # OCR's date, but only when it is plausibly complete.
+            expiry_raw_text = ocr_expiry
+    elif (
+        expiry_source in ("exp_keyword", "fallback")
+        and is_complete_date(ocr_expiry)
+    ):
+        expiry_raw_text = ocr_expiry
+    # else: only a manufacturing date, or incomplete/garbled OCR text - keep
+    # it None. Never show such a value as the expiry date.
+
+    # The same date, converted to Nepali-friendly text (Devanagari digits &
+    # Nepali month names) purely for display, e.g. "21 JUN 2026" -> "२१ जुन २०२६".
+    expiry_text_ne = format_expiry_in_nepali(expiry_raw_text)
 
     # --- Build the final answer ---
     if medicine_id:
@@ -207,6 +272,7 @@ async def scan_medicine(photo: UploadFile = File(...)):
             "identified": True,
             "source": identification_source,
             "generic_name": info["generic_name"],
+            "generic_name_ne": info.get("generic_name_ne") or None,
             "purpose_ne": info["use_ne"],
             "purpose_en": info["use_en"],
         }
@@ -217,6 +283,7 @@ async def scan_medicine(photo: UploadFile = File(...)):
             "identified": True,
             "source": identification_source,
             "generic_name": fallback_name,
+            "generic_name_ne": fallback_name_ne,
             "purpose_ne": fallback_purpose_ne,
             "purpose_en": None,  # vision model was only asked for Nepali
         }
@@ -227,11 +294,13 @@ async def scan_medicine(photo: UploadFile = File(...)):
             "identified": False,
             "source": identification_source or "none",
             "generic_name": None,
+            "generic_name_ne": None,
             "purpose_ne": None,
             "purpose_en": None,
         }
 
     result["expiry_raw_text"] = expiry_raw_text  # e.g. "12/2026", or None
+    result["expiry_text_ne"] = expiry_text_ne  # e.g. "१२/२०२६", or None
     # This tells the frontend: always show the big ✅/❌ confirm buttons,
     # never treat a guess (from ANY of the 3 steps) as final on its own.
     result["needs_user_confirmation"] = True
@@ -247,7 +316,10 @@ async def scan_medicine(photo: UploadFile = File(...)):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "vision_enabled": _vision_model is not None,
+    }
 
 
 # ==============================================================================
@@ -263,7 +335,12 @@ async def health_check():
 #      pip install -r requirements.txt
 #
 # 3. Copy .env.example to .env and fill in GEMINI_API_KEY (optional - the
-#    app still runs without it, it just can't do Step 3 / vision fallback).
+#    app still runs without it, it just can't do Step 3 / vision fallback,
+#    and its expiry-date reading falls back to OCR alone).
+#    Get a free key from https://aistudio.google.com/apikey (2026: AI Studio
+#    now issues "AQ..." Auth keys - they work fine here). If the server still
+#    reports the vision model DISABLED, the model name in vision_fallback.py
+#    is probably outdated for the current year - update it.
 #
 # 4. Start the server:
 #      uvicorn main:app --reload --port 8000
