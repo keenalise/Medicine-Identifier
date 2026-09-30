@@ -74,4 +74,9 @@ def find_expiry_text(raw_text: str) -> str | None:
         if date_match:
             return date_match.group(0)
 
+    # Vision fallback returns only the date field, without an expiry keyword.
+    date_match = DATE_PATTERN.fullmatch(raw_text.strip())
+    if date_match:
+        return date_match.group(0)
+
     return None
