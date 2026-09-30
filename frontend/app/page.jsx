@@ -170,6 +170,11 @@ export default function HomePage() {
 // and the big confirm/reject buttons - never presenting a guess as final
 // on its own.
 function ResultScreen({ photoUrl, data, text, language, onConfirm, onReject }) {
+  // Show the medicine name in the current language when the backend
+  // provided one: Nepali name in Nepali mode, English name in English mode
+  // (falling back to whichever is available).
+  const nameText =
+    language === "en" ? data.generic_name : data.generic_name_ne || data.generic_name;
   // The backend only fills in purpose_en when a local database entry was
   // matched (not when the vision-model fallback answered) - fall back to
   // the Nepali text either way rather than showing a blank in English mode.
@@ -191,7 +196,7 @@ function ResultScreen({ photoUrl, data, text, language, onConfirm, onReject }) {
       {data.identified ? (
         <div style={{ marginTop: "20px" }}>
           <p style={{ fontSize: "var(--font-size-heading)", fontWeight: 700 }}>
-            {data.generic_name}
+            {nameText}
           </p>
 
           {purposeText && (
@@ -202,7 +207,7 @@ function ResultScreen({ photoUrl, data, text, language, onConfirm, onReject }) {
 
           <p style={{ fontSize: "var(--font-size-body)", marginTop: "8px" }}>
             {text.resultExpiryLabel}{" "}
-            {data.expiry_raw_text || "?"}
+            {data.expiry_text_ne || data.expiry_raw_text || "?"}
           </p>
 
           <div
