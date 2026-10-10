@@ -45,7 +45,7 @@ import json
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image
+from PIL import Image, ImageOps
 from pyzbar.pyzbar import decode as decode_barcodes
 from dotenv import load_dotenv
 
@@ -56,7 +56,12 @@ from vision_fallback import (
     try_vision_fallback,
     try_extract_expiry_date,
 )
-from expiry_parser import analyze_expiry, format_expiry_in_nepali, is_complete_date
+from expiry_parser import (
+    analyze_expiry_texts,
+    format_expiry_in_nepali,
+    is_complete_date,
+    strip_expiry_label,
+)
 
 # Loads the GEMINI_API_KEY (and any other secrets) from a local ".env" file,
 # if one exists. See .env.example for what variable names are expected.
@@ -117,19 +122,21 @@ BARCODE_TO_ID.pop("_comment", None)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 _vision_model = create_vision_model(GEMINI_API_KEY)
-if _vision_model is not None and not verify_vision_model(_vision_model):
-    # The key exists but doesn't actually work (wrong key format, revoked,
-    # quota exhausted...). Detect it ONCE here instead of on every request,
-    # and simply disable Step 3 - exactly as if no key had been provided.
-    _vision_model = None
 
-if _vision_model is not None:
+if _vision_model is None:
+    print("[vision] Gemini vision model DISABLED - no GEMINI_API_KEY in .env.")
+elif verify_vision_model(_vision_model):
     print("[vision] Gemini vision model ENABLED - expiry date read with computer vision.")
 else:
+    # The test call failed. This is often just a free-tier rate limit at
+    # startup, so the model is NOT disabled for the whole session (that
+    # would silently turn off the most reliable expiry reader until the
+    # next restart). Per-request calls already fail gracefully; a truly
+    # broken key only costs a short failed request per scan.
     print(
-        "[vision] Gemini vision model DISABLED - vision model could not be verified. "
-        "Check GEMINI_API_KEY in .env (AI Studio now issues AQ.-style keys, which are "
-        "valid) and confirm the model name in vision_fallback.py still exists."
+        "[vision] WARNING: Gemini vision model could not be verified at startup "
+        "(rate limit, wrong GEMINI_API_KEY, or outdated model name in "
+        "vision_fallback.py). It stays enabled and will be retried on each scan."
     )
 
 
@@ -185,7 +192,11 @@ async def scan_medicine(photo: UploadFile = File(...)):
     # actually process (PIL = Python's standard image-handling library).
     try:
         image_bytes = await photo.read()
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        image = Image.open(io.BytesIO(image_bytes))
+        # Phone cameras store the photo sideways and record the real
+        # orientation in EXIF metadata. PIL ignores that unless asked, and
+        # Tesseract cannot read a sideways photo - so rotate it upright first.
+        image = ImageOps.exif_transpose(image).convert("RGB")
     except Exception:
         raise HTTPException(status_code=400, detail="Could not read the uploaded image")
 
@@ -236,30 +247,41 @@ async def scan_medicine(photo: UploadFile = File(...)):
     # When the date is uncertain, missing, or incomplete AND a vision model
     # is configured, we ask the model directly - it reads the printed
     # "Exp./म्याद" label and full date far more reliably than Tesseract.
-    expiry_source, ocr_expiry = analyze_expiry(ocr_text_for_expiry)
+    expiry_source, ocr_expiry = analyze_expiry_texts(
+        ocr_result.get("texts") or [ocr_text_for_expiry]
+    )
+    ocr_expiry_is_usable = (
+        expiry_source in ("exp_keyword", "fallback") and is_complete_date(ocr_expiry)
+    )
+    ocr_expiry_is_certain = expiry_source == "exp_keyword" and ocr_expiry_is_usable
     expiry_raw_text = None
 
     if vision_expiry:
         # The STEP-3 vision run already read an expiry date - use it.
         expiry_raw_text = vision_expiry
-    elif _vision_model is not None and expiry_source != "exp_keyword":
+    elif ocr_expiry_is_certain:
+        # OCR found a complete date right after an "EXP"/"म्याद" label - no
+        # need to spend a (slow, rate-limited) vision call on it.
+        expiry_raw_text = ocr_expiry
+    elif _vision_model is not None:
+        # OCR's date is missing, unlabeled, or has a chopped year (e.g.
+        # "20 JUN.2"): ask the model directly - it reads the printed
+        # "Exp./म्याद" label and full date far more reliably than Tesseract.
         expiry_vision = try_extract_expiry_date(image, _vision_model)
         if expiry_vision.get("expiry_text"):
             expiry_raw_text = expiry_vision["expiry_text"]
-        elif (
-            expiry_source in ("exp_keyword", "fallback")
-            and is_complete_date(ocr_expiry)
-        ):
+        elif ocr_expiry_is_usable:
             # The model couldn't answer (offline/rate limit) - fall back to
-            # OCR's date, but only when it is plausibly complete.
+            # OCR's date, which is at least complete.
             expiry_raw_text = ocr_expiry
-    elif (
-        expiry_source in ("exp_keyword", "fallback")
-        and is_complete_date(ocr_expiry)
-    ):
+    elif ocr_expiry_is_usable:
         expiry_raw_text = ocr_expiry
     # else: only a manufacturing date, or incomplete/garbled OCR text - keep
     # it None. Never show such a value as the expiry date.
+
+    # The vision model sometimes copies the label along with the date
+    # ("EXP.20 JUN.2029"); keep just the date part for display.
+    expiry_raw_text = strip_expiry_label(expiry_raw_text)
 
     # The same date, converted to Nepali-friendly text (Devanagari digits &
     # Nepali month names) purely for display, e.g. "21 JUN 2026" -> "२१ जुन २०२६".
