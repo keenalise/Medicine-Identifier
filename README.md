@@ -46,6 +46,18 @@ medicine (`backend/expiry_parser.py`):
 
 The response always carries `needs_user_confirmation: true`.
 
+**Read aloud.** Both apps have a big "🔊 सुन्नुहोस् / Listen" button on the
+result screen that speaks the medicine's name, what it is for, and the
+expiry date in the current language. The backend composes the sentence
+(`speech_text_ne` / `speech_text_en` in the `/scan` reply) and turns it
+into audio with `GET /speak?lang=ne|en&text=...`, using gTTS (Google
+Translate's free speech service, no key needed) because phone and browser
+voices very rarely include Nepali. If the backend audio cannot be played,
+the apps fall back to the device's own voices (the browser's Web Speech
+API on the web, `expo-speech` on the phone); those usually have English
+but not Nepali, in which case the nearest Devanagari voice (Hindi) reads
+the Nepali text.
+
 ## Requirements
 
 | Part | Needs |
@@ -126,7 +138,14 @@ curl -F "photo=@6e8bf737-6bf5-4944-8e5b-695cae283121.jpeg" http://localhost:8000
 `source` is one of `barcode`, `ocr`, `vision`, or `none`. `expiry_raw_text`
 is the date exactly as printed; `expiry_text_ne` is the same date with
 Devanagari digits and Nepali month names for display. Both are `null` when
-no trustworthy expiry date was found.
+no trustworthy expiry date was found. The reply also carries
+`speech_text_ne` and `speech_text_en`, the sentences the "listen" button
+reads out, for example "Paracetamol. Used for fever and mild pain. Expiry
+date 20 June 2029."
+
+`GET /speak?lang=ne&text=...` returns that sentence as an MP3
+(`audio/mpeg`). `lang` is `ne` or `en`; `text` is at most 600 characters.
+Sentences are cached in memory, so repeats are instant.
 
 ### Adding medicines
 

@@ -20,6 +20,7 @@
 
 import { useState } from "react";
 import CameraCapture from "../components/CameraCapture";
+import { speak, stopSpeaking } from "../lib/speech";
 import LanguageToggle from "../components/LanguageToggle";
 import { useLanguage } from "../lib/LanguageContext";
 
@@ -80,6 +81,7 @@ export default function HomePage() {
   }
 
   function handleReset() {
+    stopSpeaking();
     setCapture({ type: "none" });
   }
 
@@ -210,6 +212,8 @@ function ResultScreen({ photoUrl, data, text, language, onConfirm, onReject }) {
             {data.expiry_text_ne || data.expiry_raw_text || "?"}
           </p>
 
+          <ListenButton data={data} language={language} text={text} />
+
           <div
             style={{
               display: "flex",
@@ -264,8 +268,52 @@ function ResultScreen({ photoUrl, data, text, language, onConfirm, onReject }) {
               {data.expiry_text_ne || data.expiry_raw_text}
             </p>
           )}
+          <ListenButton data={data} language={language} text={text} />
           <ResetButton onClick={onReject} label={text.tryAgainButton} />
         </div>
+      )}
+    </div>
+  );
+}
+
+// A big "🔊 Listen" button that reads the result out loud in the current
+// language - the backend provides the sentence (speech_text_ne /
+// speech_text_en) so the web and mobile apps say exactly the same thing.
+function ListenButton({ data, language, text }) {
+  const [state, setState] = useState("idle"); // idle | playing | failed
+  const sentence = language === "en" ? data.speech_text_en : data.speech_text_ne;
+  if (!sentence) return null;
+
+  async function handleListen() {
+    setState("playing");
+    const ok = await speak(BACKEND_URL, sentence, language);
+    setState(ok ? "idle" : "failed");
+  }
+
+  return (
+    <div style={{ marginTop: "16px" }}>
+      <button
+        onClick={handleListen}
+        disabled={state === "playing"}
+        aria-label={text.listenButton}
+        style={{
+          minHeight: "var(--touch-target-min)",
+          padding: "0 28px",
+          fontSize: "var(--font-size-button)",
+          fontWeight: 700,
+          color: "var(--color-primary)",
+          background: "var(--color-surface)",
+          border: "3px solid var(--color-primary)",
+          borderRadius: "var(--radius-large)",
+          opacity: state === "playing" ? 0.6 : 1,
+        }}
+      >
+        {text.listenButton}
+      </button>
+      {state === "failed" && (
+        <p style={{ fontSize: "var(--font-size-label)", color: "var(--color-danger)", marginTop: "8px" }}>
+          {text.listenFailed}
+        </p>
       )}
     </div>
   );

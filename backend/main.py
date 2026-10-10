@@ -45,7 +45,9 @@ import json
 import logging
 import time
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi.responses import Response
+from gtts import gTTS
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, ImageOps
 from pyzbar.pyzbar import decode as decode_barcodes
@@ -60,6 +62,7 @@ from vision_fallback import (
 from expiry_parser import (
     analyze_expiry_texts,
     expiry_is_after_mfg,
+    format_expiry_for_speech,
     format_expiry_in_nepali,
     is_complete_date,
     strip_expiry_label,
@@ -366,11 +369,87 @@ async def scan_medicine(photo: UploadFile = File(...)):
 
     result["expiry_raw_text"] = expiry_raw_text  # e.g. "12/2026", or None
     result["expiry_text_ne"] = expiry_text_ne  # e.g. "१२/२०२६", or None
+    # Ready-made sentences for the "listen" button (text-to-speech), one
+    # per language, so both apps read out exactly the same thing. Built
+    # here rather than in each app so the wording lives in one place.
+    result["speech_text_ne"] = build_speech_text(result, expiry_raw_text, "ne")
+    result["speech_text_en"] = build_speech_text(result, expiry_raw_text, "en")
     # This tells the frontend: always show the big ✅/❌ confirm buttons,
     # never treat a guess (from ANY of the 3 steps) as final on its own.
     result["needs_user_confirmation"] = True
 
     return result
+
+
+def build_speech_text(result: dict, expiry_raw_text: str | None, language: str) -> str:
+    """
+    Composes what the "listen" button says, in Nepali ("ne") or English
+    ("en"): the medicine's name, what it is for, and the expiry date - or
+    an honest "could not identify / could not read" when a part is missing.
+    """
+    expiry_spoken = format_expiry_for_speech(expiry_raw_text, language)
+    parts = []
+    if language == "ne":
+        if result["identified"]:
+            parts.append(result.get("generic_name_ne") or result.get("generic_name") or "")
+            if result.get("purpose_ne"):
+                parts.append(f"यो औषधि {result['purpose_ne']}")
+        else:
+            parts.append("औषधि पत्ता लगाउन सकिएन")
+        parts.append(
+            f"म्याद सकिने मिति {expiry_spoken}" if expiry_spoken else "म्याद सकिने मिति पढ्न सकिएन"
+        )
+    else:
+        if result["identified"]:
+            parts.append(result.get("generic_name") or result.get("generic_name_ne") or "")
+            purpose = result.get("purpose_en") or result.get("purpose_ne")
+            if purpose:
+                parts.append(purpose)
+        else:
+            parts.append("The medicine could not be identified")
+        parts.append(
+            f"Expiry date {expiry_spoken}" if expiry_spoken else "The expiry date could not be read"
+        )
+    return "। ".join(p.strip(" ।.") for p in parts if p) + "।" if language == "ne" \
+        else ". ".join(p.strip(" .") for p in parts if p) + "."
+
+
+# ------------------------------------------------------------------------
+# Text-to-speech: GET /speak?lang=ne&text=... returns an MP3 of the text,
+# spoken in Nepali or English. Uses gTTS (Google Translate's free speech
+# service - no key needed) because phone and browser voices very rarely
+# include Nepali, while this one does. Needs internet, like the vision step.
+# Each sentence is synthesised once and kept in memory, so pressing the
+# button again (or the second app asking for the same sentence) is instant.
+# ------------------------------------------------------------------------
+
+SPEECH_LANGUAGES = {"ne", "en"}
+SPEECH_MAX_CHARS = 600
+_speech_cache: dict = {}
+_SPEECH_CACHE_LIMIT = 200
+
+
+@app.get("/speak")
+async def speak(
+    text: str = Query(..., min_length=1, max_length=SPEECH_MAX_CHARS),
+    lang: str = Query("ne"),
+):
+    if lang not in SPEECH_LANGUAGES:
+        raise HTTPException(status_code=400, detail="lang must be 'ne' or 'en'")
+    cache_key = (lang, text)
+    audio = _speech_cache.get(cache_key)
+    if audio is None:
+        try:
+            buffer = io.BytesIO()
+            gTTS(text=text, lang=lang).write_to_fp(buffer)
+            audio = buffer.getvalue()
+        except Exception as error:
+            logger.warning("speech synthesis failed: %s: %s", type(error).__name__, str(error)[:200])
+            raise HTTPException(status_code=502, detail="Speech service unavailable")
+        if len(_speech_cache) >= _SPEECH_CACHE_LIMIT:
+            _speech_cache.pop(next(iter(_speech_cache)))
+        _speech_cache[cache_key] = audio
+    return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "public, max-age=86400"})
 
 
 # ------------------------------------------------------------------------

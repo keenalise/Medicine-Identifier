@@ -19,6 +19,10 @@ and both talk to the same `backend/`.
    expiry date (see the root `README.md` for how it works that out).
 5. The app shows the result with big ✅ / ❌ buttons so the user confirms
    it rather than trusting a machine guess.
+6. A "🔊 सुन्नुहोस् / Listen" button reads the result out loud in the
+   current language (see `src/speech.js`): the backend's `/speak` audio
+   first (free Google Translate voices, which include Nepali), the phone's
+   own voices (`expo-speech`) if the backend can't be reached.
 
 ## Why Expo (not "plain" React Native)
 
@@ -38,6 +42,7 @@ mobile/
   src/
     config.js           Where the backend is (auto-detected, see below)
     api.js              The one function that uploads a photo to /scan
+    speech.js           "Listen" button logic: backend audio, phone voices
     i18n.js             Same phrase book as the web app (Nepali/English)
     LanguageContext.js   Same language-switching logic as the web app
     theme.js             Colors/font sizes (React Native has no CSS
@@ -139,6 +144,7 @@ Identical feature set to the web frontend:
 - Take-photo (on button tap only) and choose-from-gallery capture
 - Upload to the backend's `/scan` and a result screen with the medicine
   name, purpose, expiry date and ✅ / ❌ confirmation buttons
+- A "Listen" button that reads the result aloud in Nepali or English
 - Nepali-first UI with an English toggle button
 - Same bright, high-contrast, large-text design (Baloo 2 font, matching
   colors) as the web app
