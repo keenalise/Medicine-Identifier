@@ -11,6 +11,7 @@
 from expiry_parser import (
     analyze_expiry,
     analyze_expiry_texts,
+    expiry_is_after_mfg,
     find_expiry_text,
     format_expiry_in_nepali,
     is_complete_date,
@@ -93,6 +94,19 @@ def test_strip_label_and_nepali_display():
     assert format_expiry_in_nepali("20 JUN.2029") == "२० जुन २०२९"
     assert format_expiry_in_nepali("12/2026") == "१२/२०२६"
     assert format_expiry_in_nepali(None) is None
+
+
+def test_expiry_is_after_mfg():
+    assert expiry_is_after_mfg("20 JUN 2029", "21 JUN 2026") is True
+    assert expiry_is_after_mfg("20 JUN.2029", "MFG.21 JUN.2026") is True
+    assert expiry_is_after_mfg("12/2026", "09/2024") is True
+    # the blurry-photo blend: day from EXP, year from MFG -> not later
+    assert expiry_is_after_mfg("20 JUN 2026", "21 JUN 2026") is False
+    assert expiry_is_after_mfg("05/2024", "09/2024") is False
+    # unknown when either side is missing or has no usable year
+    assert expiry_is_after_mfg("20 JUN 2029", "") is None
+    assert expiry_is_after_mfg(None, "21 JUN 2026") is None
+    assert expiry_is_after_mfg("20 JUN.2", "21 JUN 2026") is None
 
 
 if __name__ == "__main__":

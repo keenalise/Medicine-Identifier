@@ -51,15 +51,15 @@ from PIL import Image, ImageOps
 from pyzbar.pyzbar import decode as decode_barcodes
 from dotenv import load_dotenv
 
-from ocr import try_ocr_lookup
+from ocr import try_ocr_lookup, match_medicine_from_text
 from vision_fallback import (
     create_vision_model,
-    verify_vision_model,
     try_vision_fallback,
     try_extract_expiry_date,
 )
 from expiry_parser import (
     analyze_expiry_texts,
+    expiry_is_after_mfg,
     format_expiry_in_nepali,
     is_complete_date,
     strip_expiry_label,
@@ -120,12 +120,11 @@ BARCODE_TO_ID.pop("_comment", None)
 # Set up the vision-model fallback (Step 3), only if an API key was
 # provided. If it wasn't, the app still works - it just can't use Step 3,
 # and will say so honestly instead of crashing. This setup runs ONCE here
-# at server startup - see vision_fallback.py for why that matters.
+# at server startup and makes no network request.
 #
 # NOTE: since 2026 Google AI Studio only issues the new "AQ..." style Auth
-# keys, which DO work with this setup. verify_vision_model() re-checks the
-# key on every server start and disables Step 3 (never failing a request)
-# if the key or model name is wrong/outdated.
+# keys, which DO work with this setup. The model names live in
+# vision_fallback.py (VISION_MODEL_NAMES).
 # ------------------------------------------------------------------------
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -133,19 +132,12 @@ _vision_model = create_vision_model(GEMINI_API_KEY)
 
 if _vision_model is None:
     print("[vision] Gemini vision model DISABLED - no GEMINI_API_KEY in .env.")
-elif verify_vision_model(_vision_model):
-    print("[vision] Gemini vision model ENABLED - expiry date read with computer vision.")
 else:
-    # The test call failed. This is often just a free-tier rate limit at
-    # startup, so the model is NOT disabled for the whole session (that
-    # would silently turn off the most reliable expiry reader until the
-    # next restart). Per-request calls already fail gracefully; a truly
-    # broken key only costs a short failed request per scan.
-    print(
-        "[vision] WARNING: Gemini vision model could not be verified at startup "
-        "(rate limit, wrong GEMINI_API_KEY, or outdated model name in "
-        "vision_fallback.py). It stays enabled and will be retried on each scan."
-    )
+    # Deliberately NO test request here: the free tier allows only ~20
+    # requests per model per DAY, and a check on every (auto)restart would
+    # eat into that. Problems with the key or model names show up in the
+    # log on the first scan instead (see vision_fallback.py).
+    print("[vision] Gemini vision model ENABLED - expiry date read with computer vision.")
 
 
 # ------------------------------------------------------------------------
@@ -216,6 +208,7 @@ async def scan_medicine(photo: UploadFile = File(...)):
     fallback_purpose_ne = None  # used when the vision model describes it
     ocr_text_for_expiry = ""  # whatever text we gather along the way
     vision_expiry = ""
+    vision_mfg = ""
 
     # --- STEP 1: barcode ---
     barcode_result = try_barcode_lookup(image)
@@ -237,13 +230,27 @@ async def scan_medicine(photo: UploadFile = File(...)):
         vision_result = try_vision_fallback(image, _vision_model)
         vision_identify_source = vision_result["source"]
         if vision_result["source"] == "vision":
-            fallback_name = vision_result["medicine_name"]
-            fallback_name_ne = vision_result.get("medicine_name_ne")
-            fallback_purpose_ne = vision_result.get("purpose_ne")
             identification_source = "vision"
+            # The model usually names the BRAND ("Niko") and, separately,
+            # the generic name ("Paracetamol"). If either is a medicine we
+            # know, answer from our own database - same name, same purpose
+            # text, same as when OCR identifies it - so the result doesn't
+            # depend on which step happened to succeed.
+            for candidate in (vision_result.get("generic_name"), vision_result.get("medicine_name")):
+                if candidate:
+                    medicine_id = match_medicine_from_text(candidate, MEDICINES_BY_ID)
+                    if medicine_id:
+                        break
+            if medicine_id is None:
+                # Not in our database: show the model's own answer, generic
+                # name first (more useful than a brand), brand as fallback.
+                fallback_name = vision_result.get("generic_name") or vision_result["medicine_name"]
+                fallback_name_ne = vision_result.get("medicine_name_ne")
+                fallback_purpose_ne = vision_result.get("purpose_ne")
             # The vision model might have read an expiry date where OCR
             # didn't - keep it around; it's used in the expiry section below.
             vision_expiry = vision_result.get("raw_text") or ""
+            vision_mfg = vision_result.get("mfg_text") or ""
 
     # --- Expiry date: attempt regardless of which step identified the medicine ---
     #
@@ -269,6 +276,15 @@ async def scan_medicine(photo: UploadFile = File(...)):
     expiry_raw_text = None
     vision_expiry_source = "skipped"
 
+    # Cross-check: if OCR read a date next to a "MFG" label, any expiry we
+    # show must be later than it. A vision answer that isn't is a blend of
+    # the two printed dates (a blurry-photo failure) - drop it and let the
+    # focused date prompt below have a go.
+    ocr_mfg = ocr_expiry if expiry_source == "mfg_keyword" else None
+    if vision_expiry and expiry_is_after_mfg(vision_expiry, ocr_mfg or vision_mfg) is False:
+        logger.warning("vision expiry %r not after mfg %r - dropped", vision_expiry, ocr_mfg or vision_mfg)
+        vision_expiry = ""
+
     if vision_expiry:
         # The STEP-3 vision run already read an expiry date - use it.
         expiry_raw_text = vision_expiry
@@ -282,8 +298,12 @@ async def scan_medicine(photo: UploadFile = File(...)):
         # "Exp./म्याद" label and full date far more reliably than Tesseract.
         expiry_vision = try_extract_expiry_date(image, _vision_model)
         vision_expiry_source = expiry_vision["source"]
-        if expiry_vision.get("expiry_text"):
-            expiry_raw_text = expiry_vision["expiry_text"]
+        candidate = expiry_vision.get("expiry_text")
+        if candidate and expiry_is_after_mfg(candidate, ocr_mfg) is False:
+            logger.warning("vision expiry %r not after OCR mfg %r - dropped", candidate, ocr_mfg)
+            candidate = None
+        if candidate:
+            expiry_raw_text = candidate
         elif ocr_expiry_is_usable:
             # The model couldn't answer (offline/rate limit) - fall back to
             # OCR's date, which is at least complete.
@@ -364,6 +384,9 @@ async def health_check():
     return {
         "status": "ok",
         "vision_enabled": _vision_model is not None,
+        # Per-model view: "available" or "resting until HH:MM" when that
+        # model's daily free-tier quota is used up.
+        "vision_models": _vision_model.status() if _vision_model is not None else {},
     }
 
 

@@ -22,9 +22,14 @@
 
 import json
 import logging
+import re
+import time
 from PIL import Image
 
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
+
+from expiry_parser import expiry_is_after_mfg
 
 # Errors from the vision model (rate limits, bad key, outdated model name)
 # are reported here so they show up in the server console instead of
@@ -45,72 +50,158 @@ PROMPT = (
     "with Nepali and/or English text on it. "
     "Reply with ONLY a JSON object (no extra words, no markdown) in "
     "exactly this shape: "
-    '{"medicine_name": "...", "medicine_name_ne": "...", "purpose_ne": "...", '
-    '"expiry_text": "..."}. '
-    "medicine_name is the medicine's name in English/Latin, and "
-    "medicine_name_ne is the same name written in Nepali (Devanagari). "
+    '{"medicine_name": "...", "generic_name": "...", "medicine_name_ne": "...", '
+    '"purpose_ne": "...", "mfg_text": "...", "expiry_text": "..."}. '
+    "medicine_name is the brand name printed on the package (for example "
+    "'Niko'). generic_name is the active ingredient / generic name in "
+    "English (for example 'Paracetamol'), usually printed in smaller text "
+    "near the brand name - leave it empty if it is not printed. "
+    "medicine_name_ne is the brand name written in Nepali (Devanagari). "
     "purpose_ne must be written in Nepali, in one short simple sentence "
     "a non-medical person can understand. "
-    "expiry_text should be the expiry date exactly as printed, or an "
-    "empty string if you cannot find one. "
+    "Medicine packaging prints a MANUFACTURING date (labelled 'Mfg.', 'Mfd.' "
+    "or 'निर्माण मिति') and a separate, later EXPIRY date (labelled 'Exp.', "
+    "'EXP' or 'म्याद'). mfg_text is the manufacturing date exactly as "
+    "printed and expiry_text is the expiry date exactly as printed (for "
+    "example '20 JUN 2029' or '12/2026'); use an empty string for any date "
+    "you cannot find. The expiry date is always later than the "
+    "manufacturing date - never mix the two. "
     "If you are not confident what the medicine is, set medicine_name "
     "to an empty string rather than guessing."
 )
 
 
-# A focused prompt asking the vision model ONLY for the expiry date. Used
+# A focused prompt asking the vision model ONLY for the two dates. Used
 # when OCR read dates but we can't tell the expiry apart from the
-# manufacturing date (or couldn't read an expiry date at all) - the model
-# can look at the photo and reliably pick the "Exp"/"म्याद" date.
+# manufacturing date (or couldn't read an expiry date at all). Asking for
+# BOTH dates makes the model read the whole date line instead of grabbing
+# the first thing that looks like a date, and lets us check that the
+# expiry really is the later of the two.
 EXPIRY_PROMPT = (
     "You are looking at a photo of a medicine box or strip. "
-    "Medicine packaging often prints a MANUFACTURING date (labelled 'Mfg.', "
+    "Medicine packaging prints a MANUFACTURING date (labelled 'Mfg.', "
     "'Mfd.' or 'निर्माण मिति') AND a separate EXPIRY date (labelled 'Exp.', "
-    "'EXP' or 'म्याद सकिने'). "
+    "'EXP' or 'म्याद सकिने'), usually one after the other on the same line, "
+    "e.g. 'MFG.21 JUN.2026 EXP.20 JUN.2029'. "
     "Reply with ONLY a JSON object (no extra words, no markdown) in exactly "
-    "this shape: {\"expiry_text\": \"...\"}. "
-    "expiry_text must be the EXPIRY date exactly as printed (for example "
-    "'21 JUN 2025' or '12/2026'), or an empty string if you cannot find an "
-    "expiry date. Never give the manufacturing date."
+    "this shape: {\"mfg_text\": \"...\", \"expiry_text\": \"...\"}. "
+    "Each value must be that date exactly as printed (for example "
+    "'21 JUN 2026' or '12/2026'), or an empty string if you cannot find it. "
+    "The expiry date is always LATER than the manufacturing date; read the "
+    "digits of each date carefully and never mix the two."
 )
 
 
-def verify_vision_model(vision_model) -> bool:
-    """
-    Sends a tiny test request to the vision model (up to two tries) and returns
-    True only if it actually responds.
+# ------------------------------------------------------------------------
+# QUOTA: the free Gemini tier allows only a SMALL number of requests per
+# DAY for each model (20/day for gemini-3.6-flash as of Oct 2026), plus a
+# per-minute limit. Two things follow:
+#   1. Never spend a request on anything but a real scan. (The old startup
+#      "is the key OK?" check cost one request per server restart - with
+#      --reload that was several per coding session.)
+#   2. Each model has its OWN daily budget, so when one model reports its
+#      day's quota is gone, switch to the next model in the list instead
+#      of failing every scan until midnight (Pacific time).
+# The list is tried in order; keep the best/fastest model first.
+# NOTE: Google renames/retires models regularly - if every scan logs
+# "NotFound", update these names from https://ai.google.dev/gemini-api/docs/models
+# ------------------------------------------------------------------------
+# (gemini-3.8-flash was tried and timed out at 120 s on every call in
+# Oct 2026, so it is deliberately not listed.)
+VISION_MODEL_NAMES = ["gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-flash-lite-latest"]
 
-    Why this exists: a Gemini API key can be present but unusable (wrong
-    key format, revoked, quota exhausted). Without this check the app would
-    discover that on EVERY scan, waiting ~1-2s each time for a call that is
-    doomed to fail. Checking once at startup (see main.py) lets the app find
-    out immediately and simply disable Step 3, behaving as if no key existed.
-    """
-    if vision_model is None:
-        return False
+# A single request must not hang a scan forever (some models have been seen
+# taking >60 s under load).
+REQUEST_TIMEOUT_SECONDS = 60
 
-    # The free tier rate-limits aggressively, so a SINGLE check can fail on a
-    # transient 429/quota error even though the key is perfectly fine. Try a
-    # few times before concluding the model is unusable - otherwise one burst
-    # at startup would silently disable computer vision for the whole session.
-    for _attempt in range(2):
-        try:
-            vision_model.generate_content("Reply with the single word: ok")
-            return True
-        except Exception as error:
-            logger.warning("startup check failed: %s", _describe_error(error))
-            continue
-    return False
+# When a 429 says the DAILY quota is gone but we can't read the retry delay
+# from it, rest that model for this long before trying it again.
+DEFAULT_COOLDOWN_SECONDS = 60 * 60
+
+
+class VisionClient:
+    """
+    Wraps the Gemini models so the rest of this file can just call
+    `client.generate([...])` and not care which model answered, whether one
+    of them is out of quota for the day, or how errors are reported.
+    """
+
+    def __init__(self, api_key: str):
+        genai.configure(api_key=api_key)
+        self._models = {name: genai.GenerativeModel(name) for name in VISION_MODEL_NAMES}
+        # model name -> unix time until which that model should not be tried
+        self._cooldown_until: dict = {}
+
+    def status(self) -> dict:
+        """For /health: which models are resting and until when."""
+        now = time.time()
+        return {
+            name: ("resting until %s" % time.strftime("%H:%M", time.localtime(until)))
+            if until > now else "available"
+            for name, until in ((n, self._cooldown_until.get(n, 0)) for n in VISION_MODEL_NAMES)
+        }
+
+    def generate(self, parts: list):
+        """
+        Sends `parts` (prompt text and/or a PIL image) to the first model
+        that is not resting. Returns the response. Raises the last error if
+        every model failed, so callers can keep their existing try/except.
+        """
+        now = time.time()
+        last_error: Exception | None = None
+        for name in VISION_MODEL_NAMES:
+            if self._cooldown_until.get(name, 0) > now:
+                continue
+            try:
+                return self._models[name].generate_content(
+                    parts, request_options={"timeout": REQUEST_TIMEOUT_SECONDS}
+                )
+            except google_exceptions.ResourceExhausted as error:
+                last_error = error
+                rest_for = _daily_quota_rest_seconds(error)
+                if rest_for:
+                    self._cooldown_until[name] = now + rest_for
+                    logger.warning(
+                        "%s: daily free-tier quota used up - resting it for %.1f h and trying the next model",
+                        name, rest_for / 3600,
+                    )
+                else:
+                    logger.warning("%s: rate-limited (per-minute) - %s", name, _describe_error(error))
+                continue
+            except Exception as error:
+                last_error = error
+                logger.warning("%s: %s - trying the next model", name, _describe_error(error))
+                continue
+        if last_error is None:
+            last_error = RuntimeError("every vision model is resting (daily quota used up)")
+        raise last_error
+
+
+def _daily_quota_rest_seconds(error: Exception) -> float | None:
+    """
+    Reads a 429 from Gemini. Returns how long to rest the model when the
+    DAILY quota is exhausted (from the error's retry_delay, else a default),
+    or None when it is only the per-minute limit (worth retrying soon).
+    """
+    text = str(error)
+    if "PerDay" not in text:
+        return None
+    match = re.search(r"retry_delay\s*\{\s*seconds:\s*(\d+)", text)
+    if match:
+        return float(match.group(1)) + 60  # a little margin past the reset
+    return float(DEFAULT_COOLDOWN_SECONDS)
 
 
 def try_extract_expiry_date(image: Image.Image, vision_model) -> dict:
     """
-    Sends `image` to the vision model and asks it ONLY what the expiry date
-    is, so it doesn't risk confusing it with the manufacturing date.
+    Sends `image` to the vision model and asks it for the manufacturing and
+    expiry dates, then keeps the expiry only if it is consistent (later
+    than the manufacturing date, when both were read).
 
     Returns a dict:
-      - {"source": "vision", "expiry_text": "21 JUN 2025"}   on success
+      - {"source": "vision", "expiry_text": "21 JUN 2025", "mfg_text": ...}  success
       - {"source": "vision_unavailable", "expiry_text": ""}  no API key
+      - {"source": "vision_inconsistent", "expiry_text": ""} expiry not after mfg
       - {"source": "vision_error", "expiry_text": ""}        request failed
     """
     if vision_model is None:
@@ -118,13 +209,12 @@ def try_extract_expiry_date(image: Image.Image, vision_model) -> dict:
 
     # Try up to twice. The FIRST attempt usually just works; the retry only
     # kicks in when the request SUCCEEDED but the model replied with an
-    # empty/unusable answer (a known flakiness on the free tier). We do NOT
-    # re-call on exceptions - google-generativeai already retries network and
-    # rate-limit (429/quota) failures internally, so a raised exception is
-    # the final answer and another call would just fail again.
+    # empty/unusable/inconsistent answer. We do NOT re-call on exceptions -
+    # VisionClient has already tried every available model by then.
+    inconsistent = False
     for _attempt in range(2):
         try:
-            response = vision_model.generate_content([EXPIRY_PROMPT, image])
+            response = vision_model.generate([EXPIRY_PROMPT, image])
             # The model sometimes wraps JSON in ```json ... ``` even when asked
             # not to - this strips that off before parsing, just in case.
             cleaned = response.text.strip().strip("`").removeprefix("json").strip()
@@ -136,42 +226,45 @@ def try_extract_expiry_date(image: Image.Image, vision_model) -> dict:
             return {"source": "vision_error", "expiry_text": ""}
 
         expiry_text = parsed.get("expiry_text") or ""
-        # Sanity check: an expiry date always contains digits. Reject clearly
-        # unhelpful answers like "unknown" so we don't show garbage text.
-        if any(ch.isdigit() for ch in expiry_text):
-            return {
-                "source": "vision",
-                "expiry_text": expiry_text,
-            }
-        # empty / digit-free reply on first attempt -> try once more
+        mfg_text = parsed.get("mfg_text") or ""
+        # Sanity check 1: an expiry date always contains digits. Reject
+        # clearly unhelpful answers like "unknown" so we don't show garbage.
+        if not any(ch.isdigit() for ch in expiry_text):
+            continue  # empty / digit-free reply -> try once more
+        # Sanity check 2: the expiry must be later than the mfg date. A
+        # blurry photo makes the model blend the two ("20 JUN 2026" from
+        # "MFG.21 JUN.2026 EXP.20 JUN.2029"); such a blend fails this test.
+        if expiry_is_after_mfg(expiry_text, mfg_text) is False:
+            logger.warning(
+                "expiry %r is not after mfg %r - rejecting (attempt %d)",
+                expiry_text, mfg_text, _attempt + 1,
+            )
+            inconsistent = True
+            continue
+        return {"source": "vision", "expiry_text": expiry_text, "mfg_text": mfg_text}
 
+    if inconsistent:
+        return {"source": "vision_inconsistent", "expiry_text": ""}
     return {"source": "vision_error", "expiry_text": ""}
 
 
 def create_vision_model(api_key: str | None):
     """
-    Sets up the connection to the vision model, using the given API key.
+    Sets up the connection to the vision models, using the given API key.
 
-    Returns the ready-to-use model object, or None if no API key was
+    Returns the ready-to-use VisionClient, or None if no API key was
     given. Returning None (instead of raising an error) is deliberate -
     it lets the rest of the app keep working without Step 3, for anyone
     who hasn't set up a Gemini key yet, rather than forcing it to be
     required from day one.
 
     Call this ONCE when the server starts (see main.py), not on every
-    single request - there's no need to redo this setup each time.
+    single request. It makes NO network request - the key is only used
+    (and only costs quota) when a photo actually needs the vision model.
     """
-    if not api_key:
+    if not api_key or api_key.strip() in ("", "your_gemini_api_key_here"):
         return None
-
-    genai.configure(api_key=api_key)
-
-    # NOTE: Google renames/updates their free-tier model names occasionally.
-    # Old names (gemini-1.5-flash, gemini-2.x) return "model not found"
-    # errors and VISION WOULD STAY DISABLED. As of 2026 the current
-    # free-tier multimodal model is "gemini-3.6-flash" - for the up-to-date
-    # list, see https://ai.google.dev/gemini-api/docs/models
-    return genai.GenerativeModel("gemini-3.6-flash")
+    return VisionClient(api_key.strip())
 
 
 def try_vision_fallback(image: Image.Image, vision_model) -> dict:
@@ -196,7 +289,7 @@ def try_vision_fallback(image: Image.Image, vision_model) -> dict:
         return {"source": "vision_unavailable", "medicine_name": None, "raw_text": ""}
 
     try:
-        response = vision_model.generate_content([PROMPT, image])
+        response = vision_model.generate([PROMPT, image])
         # The model sometimes wraps JSON in ```json ... ``` even when asked
         # not to - this strips that off before parsing, just in case.
         cleaned = response.text.strip().strip("`").removeprefix("json").strip()
@@ -208,10 +301,21 @@ def try_vision_fallback(image: Image.Image, vision_model) -> dict:
         logger.warning("identify call failed: %s", _describe_error(error))
         return {"source": "vision_error", "medicine_name": None, "raw_text": ""}
 
+    expiry_text = parsed.get("expiry_text") or ""
+    mfg_text = parsed.get("mfg_text") or ""
+    if expiry_is_after_mfg(expiry_text, mfg_text) is False:
+        # Same blend problem as in try_extract_expiry_date: don't pass on
+        # an expiry that isn't later than the mfg date. main.py will ask
+        # the focused date prompt instead.
+        logger.warning("identify call: expiry %r not after mfg %r - dropped", expiry_text, mfg_text)
+        expiry_text = ""
+
     return {
         "source": "vision",
         "medicine_name": parsed.get("medicine_name") or None,
+        "generic_name": parsed.get("generic_name") or None,
         "medicine_name_ne": parsed.get("medicine_name_ne") or None,
         "purpose_ne": parsed.get("purpose_ne") or None,
-        "raw_text": parsed.get("expiry_text") or "",
+        "mfg_text": mfg_text,
+        "raw_text": expiry_text,
     }
