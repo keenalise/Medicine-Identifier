@@ -32,7 +32,8 @@
         {
           "photosPermission": "This app needs access to your photos so you can choose a medicine photo from your gallery."
         }
-      ]
+      ],
+      "expo-audio"
     ]
   }
 }

@@ -32,6 +32,8 @@ const ne = {
   resultExpiredWarning: "⚠️ यो औषधिको म्याद सकिसक्यो, प्रयोग नगर्नुहोस्",
   confirmCorrectButton: "✅ ठीक छ",
   confirmWrongButton: "❌ मिलेन",
+  listenButton: "🔊 सुन्नुहोस्",
+  listenFailed: "आवाज बजाउन सकिएन",
 
   correctionPromptExpiry: "सही मिति छान्नुहोस्",
   correctionPromptName: "सही औषधिको नाम छान्नुहोस्",
@@ -67,6 +69,8 @@ const en = {
   resultExpiredWarning: "⚠️ This medicine has expired, do not use it",
   confirmCorrectButton: "✅ Correct",
   confirmWrongButton: "❌ Not right",
+  listenButton: "🔊 Listen",
+  listenFailed: "Could not play the audio",
 
   correctionPromptExpiry: "Please pick the correct expiry date",
   correctionPromptName: "Please pick the correct medicine",
