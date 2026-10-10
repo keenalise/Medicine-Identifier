@@ -21,9 +21,20 @@
 # ==============================================================================
 
 import json
+import logging
 from PIL import Image
 
 import google.generativeai as genai
+
+# Errors from the vision model (rate limits, bad key, outdated model name)
+# are reported here so they show up in the server console instead of
+# silently turning into "not identified" / "no expiry date".
+logger = logging.getLogger("vision")
+
+
+def _describe_error(error: Exception) -> str:
+    text = " ".join(str(error).split())
+    return f"{type(error).__name__}: {text[:200]}"
 
 
 # The exact instructions given to the vision model. Asking for ONLY a JSON
@@ -86,7 +97,8 @@ def verify_vision_model(vision_model) -> bool:
         try:
             vision_model.generate_content("Reply with the single word: ok")
             return True
-        except Exception:
+        except Exception as error:
+            logger.warning("startup check failed: %s", _describe_error(error))
             continue
     return False
 
@@ -117,9 +129,10 @@ def try_extract_expiry_date(image: Image.Image, vision_model) -> dict:
             # not to - this strips that off before parsing, just in case.
             cleaned = response.text.strip().strip("`").removeprefix("json").strip()
             parsed = json.loads(cleaned)
-        except Exception:
+        except Exception as error:
             # Network error, rate limit, or an unparseable reply - fail
             # gracefully rather than crashing the whole /scan request.
+            logger.warning("expiry call failed: %s", _describe_error(error))
             return {"source": "vision_error", "expiry_text": ""}
 
         expiry_text = parsed.get("expiry_text") or ""
@@ -188,10 +201,11 @@ def try_vision_fallback(image: Image.Image, vision_model) -> dict:
         # not to - this strips that off before parsing, just in case.
         cleaned = response.text.strip().strip("`").removeprefix("json").strip()
         parsed = json.loads(cleaned)
-    except Exception:
+    except Exception as error:
         # Could be a network error, a rate-limit (free tier), or the model
         # replying in a format we couldn't parse. Either way, we fail
         # gracefully rather than crashing the whole /scan request.
+        logger.warning("identify call failed: %s", _describe_error(error))
         return {"source": "vision_error", "medicine_name": None, "raw_text": ""}
 
     return {

@@ -42,6 +42,8 @@
 import os
 import io
 import json
+import logging
+import time
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -72,6 +74,12 @@ load_dotenv()
 # ------------------------------------------------------------------------
 
 app = FastAPI(title="Medicine Identifier Backend")
+
+# One line per scan in the server console saying what each step found and
+# how long it took - the quickest way to tell "OCR missed it", "vision was
+# rate-limited" and "the phone sent a bad photo" apart.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(name)s] %(message)s")
+logger = logging.getLogger("scan")
 
 # CORS = "Cross-Origin Resource Sharing". In plain words: browsers block a
 # webpage from one address (our frontend, e.g. http://localhost:3000) from
@@ -200,6 +208,7 @@ async def scan_medicine(photo: UploadFile = File(...)):
     except Exception:
         raise HTTPException(status_code=400, detail="Could not read the uploaded image")
 
+    started_at = time.monotonic()
     medicine_id = None
     identification_source = None
     fallback_name = None  # used when the vision model names a medicine
@@ -217,13 +226,16 @@ async def scan_medicine(photo: UploadFile = File(...)):
     # --- STEP 2: OCR (always run, so we can read the expiry date) ---
     ocr_result = try_ocr_lookup(image, MEDICINES_BY_ID)
     ocr_text_for_expiry = ocr_result["raw_text"]
+    ocr_seconds = time.monotonic() - started_at
     if medicine_id is None and ocr_result["medicine_id"]:
         medicine_id = ocr_result["medicine_id"]
         identification_source = "ocr"
 
     # --- STEP 3: vision model fallback (only if steps 1 and 2 both failed) ---
+    vision_identify_source = "skipped"
     if medicine_id is None:
         vision_result = try_vision_fallback(image, _vision_model)
+        vision_identify_source = vision_result["source"]
         if vision_result["source"] == "vision":
             fallback_name = vision_result["medicine_name"]
             fallback_name_ne = vision_result.get("medicine_name_ne")
@@ -255,6 +267,7 @@ async def scan_medicine(photo: UploadFile = File(...)):
     )
     ocr_expiry_is_certain = expiry_source == "exp_keyword" and ocr_expiry_is_usable
     expiry_raw_text = None
+    vision_expiry_source = "skipped"
 
     if vision_expiry:
         # The STEP-3 vision run already read an expiry date - use it.
@@ -268,6 +281,7 @@ async def scan_medicine(photo: UploadFile = File(...)):
         # "20 JUN.2"): ask the model directly - it reads the printed
         # "Exp./म्याद" label and full date far more reliably than Tesseract.
         expiry_vision = try_extract_expiry_date(image, _vision_model)
+        vision_expiry_source = expiry_vision["source"]
         if expiry_vision.get("expiry_text"):
             expiry_raw_text = expiry_vision["expiry_text"]
         elif ocr_expiry_is_usable:
@@ -320,6 +334,15 @@ async def scan_medicine(photo: UploadFile = File(...)):
             "purpose_ne": None,
             "purpose_en": None,
         }
+
+    logger.info(
+        "photo %sx%s | ocr %.1fs medicine=%s expiry=%s %r | vision identify=%s expiry=%s | "
+        "result identified=%s name=%r expiry=%r | %.1fs total",
+        image.width, image.height, ocr_seconds, ocr_result["medicine_id"],
+        expiry_source, ocr_expiry, vision_identify_source, vision_expiry_source,
+        result["identified"], result["generic_name"], expiry_raw_text,
+        time.monotonic() - started_at,
+    )
 
     result["expiry_raw_text"] = expiry_raw_text  # e.g. "12/2026", or None
     result["expiry_text_ne"] = expiry_text_ne  # e.g. "१२/२०२६", or None
