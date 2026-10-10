@@ -3,11 +3,19 @@
 //
 // WHAT THIS FILE DOES (in plain words):
 // The mobile equivalent of the web app's app/page.jsx: the first screen
-// the user sees, showing the bright header + language toggle, and either
-// the camera (default) or a placeholder "captured!" screen after a photo
-// is taken / barcode found.
+// the user sees, showing the bright header + language toggle, and then
+// one of four things, same as the web app:
+//   1. The camera (default).
+//   2. A "identifying..." message while the photo is uploaded to the
+//      backend and analysed.
+//   3. The result: the photo, the medicine's name, what it's for, and the
+//      expiry date, with big ✅ / ❌ buttons so the user confirms it.
+//   4. An error message with a "try again" button if the backend could
+//      not be reached.
 //
-// Same TODO as the web version: the backend call isn't wired up yet.
+// The barcode is NOT sent to the backend separately: the backend reads
+// barcodes out of the photo itself (its step 1), so a photo is all it
+// ever needs. CameraCapture takes a photo the moment it sees a barcode.
 // ============================================================================
 
 import { useState } from "react";
@@ -17,27 +25,48 @@ import CameraCapture from "../components/CameraCapture";
 import LanguageToggle from "../components/LanguageToggle";
 import { useLanguage } from "../LanguageContext";
 import { theme } from "../theme";
+import { scanPhoto } from "../api";
+import { BACKEND_URL, BACKEND_URL_IS_GUESS } from "../config";
 
 export default function HomeScreen() {
-  const { text } = useLanguage();
-  // Same shape as the web version: { type: "none" } | { type: "barcode", value }
-  // | { type: "photo", photoUri }
+  const { text, language } = useLanguage();
+  // Same shape as the web version:
+  //   { type: "none" }                       - camera is showing
+  //   { type: "loading", photoUri }          - waiting for the backend
+  //   { type: "result", photoUri, data }     - backend responded
+  //   { type: "error" }                      - request failed
   const [capture, setCapture] = useState({ type: "none" });
 
-  function handleBarcodeFound(barcodeText) {
-    // TODO (backend step): send `barcodeText` to the backend's /scan
-    // endpoint. Placeholder for now, same as the web app at this stage.
-    setCapture({ type: "barcode", value: barcodeText });
+  function handleBarcodeFound(_barcodeText) {
+    // Intentionally empty: CameraCapture also takes a photo when it finds
+    // a barcode, and that photo (which contains the barcode) is what gets
+    // sent to the backend via handlePhotoCaptured below.
   }
 
-  function handlePhotoCaptured(photoUri) {
-    // TODO (backend step): upload the photo at `photoUri` to the
-    // backend's /scan endpoint. Placeholder for now.
-    setCapture({ type: "photo", photoUri });
+  async function handlePhotoCaptured(photoUri) {
+    setCapture({ type: "loading", photoUri });
+    try {
+      const data = await scanPhoto(photoUri);
+      setCapture({ type: "result", photoUri, data });
+    } catch (error) {
+      // Common causes: the backend isn't running, it was started without
+      // --host 0.0.0.0 so the phone can't reach it, or the phone is on a
+      // different Wi-Fi. Tell the user plainly rather than leaving them
+      // staring at a spinner forever.
+      console.warn("Scan request failed:", error);
+      setCapture({ type: "error" });
+    }
   }
 
   function handleReset() {
     setCapture({ type: "none" });
+  }
+
+  function handleConfirmation(wasCorrect) {
+    // TODO (future step): send this confirmation/correction back to the
+    // backend so it can be logged and used to grow medicine_db.json.
+    console.log("User confirmed result was correct:", wasCorrect);
+    handleReset();
   }
 
   return (
@@ -64,27 +93,105 @@ export default function HomeScreen() {
           </>
         )}
 
-        {capture.type === "barcode" && (
-          <View style={styles.centered}>
-            <Text style={styles.bodyText}>
-              {/* Placeholder until the backend lookup exists */}
-              Barcode captured: {capture.value}
-            </Text>
-            <ResetButton onPress={handleReset} label={text.tryAgainButton} />
-          </View>
-        )}
-
-        {capture.type === "photo" && (
+        {capture.type === "loading" && (
           <View style={styles.centered}>
             <Image
               source={{ uri: capture.photoUri }}
               style={styles.capturedPhoto}
               resizeMode="cover"
             />
+            <Text style={[styles.bodyText, { marginTop: 20 }]}>
+              {text.scanningOcrVision}
+            </Text>
+          </View>
+        )}
+
+        {capture.type === "error" && (
+          <View style={styles.centered}>
+            <Text style={[styles.bodyText, { color: theme.colors.danger }]}>
+              {text.errorGeneric}
+            </Text>
+            {/* Developer hint, deliberately small: which address was tried.
+                The most common failure is the backend not being reachable
+                from the phone, and this makes that obvious at a glance. */}
+            <Text style={styles.hintText}>
+              {BACKEND_URL}
+              {BACKEND_URL_IS_GUESS
+                ? "\n(could not detect the laptop's address - set BACKEND_URL_OVERRIDE in src/config.js)"
+                : ""}
+            </Text>
             <ResetButton onPress={handleReset} label={text.tryAgainButton} />
           </View>
         )}
+
+        {capture.type === "result" && (
+          <ResultScreen
+            photoUri={capture.photoUri}
+            data={capture.data}
+            text={text}
+            language={language}
+            onConfirm={() => handleConfirmation(true)}
+            onReject={() => handleConfirmation(false)}
+          />
+        )}
       </ScrollView>
+    </View>
+  );
+}
+
+// The screen shown after the backend responds: the photo, what it found,
+// and the big confirm/reject buttons - never presenting a guess as final
+// on its own. Mirrors ResultScreen in the web app.
+function ResultScreen({ photoUri, data, text, language, onConfirm, onReject }) {
+  // Nepali name in Nepali mode, English name in English mode, falling back
+  // to whichever one the backend actually provided.
+  const nameText =
+    language === "en" ? data.generic_name : data.generic_name_ne || data.generic_name;
+  // purpose_en is only filled in for medicines from our own database (not
+  // when the vision model answered), so fall back to the Nepali text.
+  const purposeText =
+    language === "en" && data.purpose_en ? data.purpose_en : data.purpose_ne;
+  const expiryText = data.expiry_text_ne || data.expiry_raw_text || "?";
+
+  return (
+    <View style={styles.centered}>
+      <Image source={{ uri: photoUri }} style={styles.capturedPhoto} resizeMode="cover" />
+
+      {data.identified ? (
+        <View style={styles.resultBlock}>
+          <Text style={styles.resultName}>{nameText}</Text>
+
+          {purposeText ? (
+            <Text style={styles.bodyText}>
+              {text.resultPurposeLabel} {purposeText}
+            </Text>
+          ) : null}
+
+          <Text style={[styles.bodyText, { marginTop: 8 }]}>
+            {text.resultExpiryLabel} {expiryText}
+          </Text>
+
+          <View style={styles.confirmRow}>
+            <Pressable
+              onPress={onConfirm}
+              style={[styles.confirmButton, { backgroundColor: theme.colors.success }]}
+            >
+              <Text style={styles.confirmButtonLabel}>{text.confirmCorrectButton}</Text>
+            </Pressable>
+            <Pressable
+              onPress={onReject}
+              style={[styles.confirmButton, { backgroundColor: theme.colors.danger }]}
+            >
+              <Text style={styles.confirmButtonLabel}>{text.confirmWrongButton}</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : (
+        <View style={styles.resultBlock}>
+          <Text style={styles.bodyText}>{text.scanningFailedRetry}</Text>
+          <ResetButton onPress={onReject} label={text.tryAgainButton} />
+        </View>
+      )}
     </View>
   );
 }
@@ -142,10 +249,47 @@ const styles = StyleSheet.create({
     color: theme.colors.text,
     textAlign: "center",
   },
+  hintText: {
+    fontSize: 13,
+    color: theme.colors.text,
+    opacity: 0.6,
+    textAlign: "center",
+    marginTop: 12,
+  },
   capturedPhoto: {
     width: "100%",
     aspectRatio: 3 / 4,
     borderRadius: theme.radiusLarge,
+  },
+  resultBlock: {
+    width: "100%",
+    alignItems: "center",
+    marginTop: 20,
+  },
+  resultName: {
+    fontSize: theme.fontSize.heading,
+    fontWeight: "700",
+    color: theme.colors.text,
+    textAlign: "center",
+    marginBottom: 8,
+  },
+  confirmRow: {
+    flexDirection: "row",
+    gap: 16,
+    justifyContent: "center",
+    marginTop: 24,
+  },
+  confirmButton: {
+    minHeight: theme.touchTargetMin,
+    paddingHorizontal: 28,
+    borderRadius: theme.radiusLarge,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  confirmButtonLabel: {
+    color: theme.colors.textOnPrimary,
+    fontSize: theme.fontSize.button,
+    fontWeight: "700",
   },
   resetButton: {
     marginTop: 20,
