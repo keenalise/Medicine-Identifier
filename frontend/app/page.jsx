@@ -255,6 +255,15 @@ function ResultScreen({ photoUrl, data, text, language, onConfirm, onReject }) {
           <p style={{ fontSize: "var(--font-size-body)" }}>
             {text.scanningFailedRetry}
           </p>
+          {/* The medicine itself may be unknown while the expiry date was
+              still read off the packaging - that date is the most
+              safety-relevant thing on the box, so show it anyway. */}
+          {(data.expiry_text_ne || data.expiry_raw_text) && (
+            <p style={{ fontSize: "var(--font-size-body)", marginTop: "8px" }}>
+              {text.resultExpiryLabel}{" "}
+              {data.expiry_text_ne || data.expiry_raw_text}
+            </p>
+          )}
           <ResetButton onClick={onReject} label={text.tryAgainButton} />
         </div>
       )}

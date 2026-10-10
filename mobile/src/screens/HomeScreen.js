@@ -189,6 +189,14 @@ function ResultScreen({ photoUri, data, text, language, onConfirm, onReject }) {
       ) : (
         <View style={styles.resultBlock}>
           <Text style={styles.bodyText}>{text.scanningFailedRetry}</Text>
+          {/* The medicine itself may be unknown while the expiry date was
+              still read off the packaging - that date is the most
+              safety-relevant thing on the box, so show it anyway. */}
+          {data.expiry_text_ne || data.expiry_raw_text ? (
+            <Text style={[styles.bodyText, { marginTop: 12 }]}>
+              {text.resultExpiryLabel} {expiryText}
+            </Text>
+          ) : null}
           <ResetButton onPress={onReject} label={text.tryAgainButton} />
         </View>
       )}

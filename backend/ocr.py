@@ -262,6 +262,23 @@ def try_ocr_lookup(image: Image.Image, medicines_by_id: dict) -> dict:
     raw_text = "\n".join(texts)
     matched_medicine_id = match_medicine_from_text(raw_text, medicines_by_id)
 
+    # Tesseract guesses the text direction from the page layout, and on a
+    # phone photo of a strip held sideways that guess is often wrong - the
+    # brand name comes back as mirrored gibberish ("DILAMAdILNY"). When no
+    # name matched, read the photo again at the other three rotations;
+    # the first one that yields a known name wins. ~1 s per rotation.
+    if matched_medicine_id is None:
+        base = _shrink_for_ocr(image)
+        for angle in (90, 270, 180):
+            rotated_text = _ocr(base.rotate(angle, expand=True))
+            if not rotated_text.strip():
+                continue
+            texts.append(rotated_text)
+            matched_medicine_id = match_medicine_from_text(rotated_text, medicines_by_id)
+            if matched_medicine_id is not None:
+                break
+        raw_text = "\n".join(texts)
+
     return {
         "source": "ocr" if matched_medicine_id else "ocr_unmatched",
         "medicine_id": matched_medicine_id,
