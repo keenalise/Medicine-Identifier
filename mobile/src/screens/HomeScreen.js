@@ -15,7 +15,10 @@
 //
 // The barcode is NOT sent to the backend separately: the backend reads
 // barcodes out of the photo itself (its step 1), so a photo is all it
-// ever needs. CameraCapture takes a photo the moment it sees a barcode.
+// ever needs. The photo is taken only when the user taps "Take Photo".
+//
+// The result screen also has a "🔊 Listen" button (see src/speech.js)
+// that reads the name, purpose and expiry date aloud in Nepali or English.
 // ============================================================================
 
 import { useState } from "react";
@@ -26,6 +29,7 @@ import LanguageToggle from "../components/LanguageToggle";
 import { useLanguage } from "../LanguageContext";
 import { theme } from "../theme";
 import { scanPhoto } from "../api";
+import { speak, stopSpeaking } from "../speech";
 import { BACKEND_URL, BACKEND_URL_IS_GUESS } from "../config";
 
 export default function HomeScreen() {
@@ -38,9 +42,8 @@ export default function HomeScreen() {
   const [capture, setCapture] = useState({ type: "none" });
 
   function handleBarcodeFound(_barcodeText) {
-    // Intentionally empty: CameraCapture also takes a photo when it finds
-    // a barcode, and that photo (which contains the barcode) is what gets
-    // sent to the backend via handlePhotoCaptured below.
+    // Intentionally empty: the barcode is read by the backend from the
+    // photo the user takes, which is sent via handlePhotoCaptured below.
   }
 
   async function handlePhotoCaptured(photoUri) {
@@ -59,6 +62,7 @@ export default function HomeScreen() {
   }
 
   function handleReset() {
+    stopSpeaking();
     setCapture({ type: "none" });
   }
 
@@ -171,6 +175,8 @@ function ResultScreen({ photoUri, data, text, language, onConfirm, onReject }) {
             {text.resultExpiryLabel} {expiryText}
           </Text>
 
+          <ListenButton data={data} language={language} text={text} />
+
           <View style={styles.confirmRow}>
             <Pressable
               onPress={onConfirm}
@@ -197,9 +203,41 @@ function ResultScreen({ photoUri, data, text, language, onConfirm, onReject }) {
               {text.resultExpiryLabel} {expiryText}
             </Text>
           ) : null}
+          <ListenButton data={data} language={language} text={text} />
           <ResetButton onPress={onReject} label={text.tryAgainButton} />
         </View>
       )}
+    </View>
+  );
+}
+
+// A big "🔊 Listen" button that reads the result out loud in the current
+// language - the backend provides the sentence (speech_text_ne /
+// speech_text_en) so the mobile and web apps say exactly the same thing.
+function ListenButton({ data, language, text }) {
+  const [state, setState] = useState("idle"); // idle | playing | failed
+  const sentence = language === "en" ? data.speech_text_en : data.speech_text_ne;
+  if (!sentence) return null;
+
+  async function handleListen() {
+    setState("playing");
+    const ok = await speak(sentence, language);
+    setState(ok ? "idle" : "failed");
+  }
+
+  return (
+    <View style={styles.listenBlock}>
+      <Pressable
+        onPress={handleListen}
+        disabled={state === "playing"}
+        accessibilityLabel={text.listenButton}
+        style={[styles.listenButton, state === "playing" && { opacity: 0.6 }]}
+      >
+        <Text style={styles.listenButtonLabel}>{text.listenButton}</Text>
+      </Pressable>
+      {state === "failed" ? (
+        <Text style={styles.listenFailedText}>{text.listenFailed}</Text>
+      ) : null}
     </View>
   );
 }
@@ -298,6 +336,31 @@ const styles = StyleSheet.create({
     color: theme.colors.textOnPrimary,
     fontSize: theme.fontSize.button,
     fontWeight: "700",
+  },
+  listenBlock: {
+    width: "100%",
+    alignItems: "center",
+    marginTop: 16,
+  },
+  listenButton: {
+    minHeight: theme.touchTargetMin,
+    paddingHorizontal: 32,
+    borderRadius: theme.radiusLarge,
+    borderWidth: 3,
+    borderColor: theme.colors.primary,
+    backgroundColor: theme.colors.surface,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  listenButtonLabel: {
+    color: theme.colors.primary,
+    fontSize: theme.fontSize.button,
+    fontWeight: "700",
+  },
+  listenFailedText: {
+    fontSize: theme.fontSize.label,
+    color: theme.colors.danger,
+    marginTop: 8,
   },
   resetButton: {
     marginTop: 20,

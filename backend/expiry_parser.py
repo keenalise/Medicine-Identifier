@@ -535,6 +535,48 @@ def is_complete_date(raw_date: str | None) -> bool:
     return len(last_number[-1]) in (2, 4)
 
 
+_MONTHS_EN_FULL = {
+    "jan": "January", "feb": "February", "mar": "March", "apr": "April",
+    "may": "May", "jun": "June", "jul": "July", "aug": "August",
+    "sep": "September", "oct": "October", "nov": "November", "dec": "December",
+}
+
+
+def format_expiry_for_speech(raw_date: str | None, language: str) -> str | None:
+    """
+    Turns the raw expiry text into something a text-to-speech engine reads
+    naturally. For English, month abbreviations become full names and
+    numeric months become month names:
+        "20 JUN.2029" -> "20 June 2029"
+        "12/2026"     -> "December 2026"
+        "21/06/2026"  -> "21 June 2026"
+    For Nepali the display form (Devanagari digits + Nepali month names)
+    already reads well, so it is reused:
+        "20 JUN.2029" -> "२० जुन २०२९"
+    """
+    if not raw_date:
+        return None
+    if language == "ne":
+        return format_expiry_in_nepali(raw_date)
+
+    text = _normalize_ocr_text(raw_date)
+    month_match = re.search(_LATIN_MONTHS, text, re.IGNORECASE)
+    numbers = re.findall(r"\d+", text.translate(_DIGITS_EN))
+    if month_match:
+        month = _MONTHS_EN_FULL.get(month_match.group(0)[:3].lower(), month_match.group(0))
+        day = numbers[0] if len(numbers) >= 2 else None
+        year = numbers[-1] if numbers else ""
+        return f"{day} {month} {year}".strip() if day else f"{month} {year}".strip()
+    if len(numbers) == 2:  # MM/YYYY
+        month = _MONTHS_EN_FULL.get(list(_MONTHS_EN_FULL)[int(numbers[0]) - 1], numbers[0]) if 1 <= int(numbers[0]) <= 12 else numbers[0]
+        return f"{month} {numbers[1]}"
+    if len(numbers) == 3:  # DD/MM/YYYY
+        month_index = int(numbers[1])
+        month = list(_MONTHS_EN_FULL.values())[month_index - 1] if 1 <= month_index <= 12 else numbers[1]
+        return f"{numbers[0]} {month} {numbers[2]}"
+    return raw_date
+
+
 def format_expiry_in_nepali(raw_date: str | None) -> str | None:
     """
     Turns the raw matched expiry text into a Nepali-friendly display string:
