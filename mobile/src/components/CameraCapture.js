@@ -4,10 +4,14 @@
 // WHAT THIS FILE DOES (in plain words):
 // The mobile equivalent of the web app's CameraCapture.jsx. Same behavior:
 //   - Shows a live camera preview.
-//   - Continuously watches for a barcode while the camera is open. If one
-//     is found, calls onBarcodeFound immediately.
-//   - Has a "Take Photo" button for when there's no barcode (or none was
-//     found), which calls onPhotoCaptured with the captured photo.
+//   - Quietly watches for a barcode while the camera is open and reports
+//     it through onBarcodeFound (informational only - the backend reads
+//     the barcode out of the photo itself).
+//   - Takes a photo ONLY when the user taps the "Take Photo" button - no
+//     automatic capture, so the user decides when the medicine is lined
+//     up and in focus. The photo is handed to onPhotoCaptured, and the
+//     home screen sends it to the backend to get the name, purpose and
+//     expiry date.
 //   - Has a "Choose from Gallery" fallback, always available, even if the
 //     camera itself fails to start.
 //
@@ -15,6 +19,17 @@
 // ask the user for camera permission (there's no browser doing that for
 // us), so this file also has to handle "permission not yet granted" as
 // its own screen state.
+//
+// WHY THE "CAMERA READY" HANDLING EXISTS:
+// expo-camera throws "Failed to capture image" when takePictureAsync is
+// called before the camera session has actually started, or in the same
+// moment the session is being reconfigured. The earlier version of this
+// file did both: it fired an automatic capture 5 s after the component
+// mounted (not 5 s after the camera was READY), and it switched the
+// barcode scanner off (a prop change that restarts the session) in the
+// very same tick as taking the photo. Now the button is disabled until
+// onCameraReady fires, camera props never change just before capturing
+// (the scanner stays on), and a failed capture is retried once.
 // ============================================================================
 
 import { useEffect, useRef, useState } from "react";
@@ -23,6 +38,14 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
 import { useLanguage } from "../LanguageContext";
 import { theme } from "../theme";
+
+// A short pause before retrying a failed capture, long enough for the
+// camera session to settle on slower phones.
+const RETRY_DELAY_MS = 700;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export default function CameraCapture({ onBarcodeFound, onPhotoCaptured }) {
   const { text } = useLanguage();
@@ -37,42 +60,65 @@ export default function CameraCapture({ onBarcodeFound, onPhotoCaptured }) {
   // popup.
   const [permission, requestPermission] = useCameraPermissions();
 
-  // Once a barcode is found, we stop reacting to further scans (otherwise
-  // onBarcodeFound could fire repeatedly per second while the camera
-  // keeps looking at the same barcode).
-  const [hasScannedBarcode, setHasScannedBarcode] = useState(false);
-  const hasScannedBarcodeRef = useRef(false);
+  // Set by the camera itself once its session is running. Nothing may
+  // capture before this is true.
+  const [isCameraReady, setIsCameraReady] = useState(false);
 
+  // Once a capture has started, ignore further button taps so we don't
+  // take two photos. A ref is used for the actual check (always current,
+  // even mid-await), and the state copy is only for showing the right
+  // status message.
+  const captureStartedRef = useRef(false);
+  const [captureStarted, setCaptureStarted] = useState(false);
+
+  // Remembers whether the component is still on screen, so a capture that
+  // finishes after the user navigated away doesn't try to update state.
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  async function capturePhoto() {
+    if (captureStartedRef.current) return;
+    if (!cameraRef.current || !isCameraReady) return;
+    captureStartedRef.current = true;
+    setCaptureStarted(true);
+
+    // Try twice: the first attempt occasionally fails right after the
+    // session starts, and a second attempt a moment later nearly always
+    // succeeds. `quality: 0.8` keeps the upload small while still being
+    // clear enough to read text off a medicine label.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const photo = await cameraRef.current.takePictureAsync({ quality: 0.8 });
+        if (isMountedRef.current) onPhotoCaptured(photo.uri);
+        return;
+      } catch (error) {
+        console.warn(`Camera capture failed (attempt ${attempt}):`, error);
+        if (attempt < 2) await sleep(RETRY_DELAY_MS);
+      }
+    }
+
+    // Both attempts failed: let the user tap the button again instead of
+    // leaving the component stuck in "capture started".
+    if (isMountedRef.current) {
+      captureStartedRef.current = false;
+      setCaptureStarted(false);
+    }
+  }
+
+  // Reports the first barcode seen, once. Nothing is captured here - the
+  // user still decides when to take the photo, and the backend reads the
+  // barcode from that photo.
+  const reportedBarcodeRef = useRef(false);
   function handleBarcodeScanned(result) {
-    if (hasScannedBarcode) return; // already handled one, ignore further scans
-    hasScannedBarcodeRef.current = true;
-    setHasScannedBarcode(true);
+    if (reportedBarcodeRef.current) return;
+    reportedBarcodeRef.current = true;
     onBarcodeFound(result.data);
   }
-
-  async function handleTakePhoto() {
-    if (!cameraRef.current) return;
-    // Taking a photo while the barcode scanner is still actively watching
-  // the camera feed can fail on some devices ("Failed to capture
-  // image") - stopping barcode scanning first, right before capturing,
-  // avoids that conflict.
-  hasScannedBarcodeRef.current = true;
-  setHasScannedBarcode(true);
-
-  try {
-    // Takes a still photo from the current camera view. `quality: 0.8`
-    // keeps the file size reasonable for uploading over mobile data,
-    // while still being clear enough to read text off a medicine label.
-    const photo = await cameraRef.current.takePictureAsync({ quality: 0.8 });
-    onPhotoCaptured(photo.uri);
-  } catch (error) {
-    // The camera can genuinely fail to capture (not fully ready yet, or
-    // a device-specific quirk) - catching this means the user sees
-    // nothing happen and can just tap the button again, instead of the
-    // app crashing with a raw error screen.
-    console.warn("Camera capture failed, user can retry:", error);
-  }
-}
 
   async function handleUploadFromGallery() {
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -83,25 +129,6 @@ export default function CameraCapture({ onBarcodeFound, onPhotoCaptured }) {
       onPhotoCaptured(result.assets[0].uri);
     }
   }
-
-
-  // If no barcode is found within a few seconds, automatically move on
-  // to taking a photo instead of leaving the user stuck watching
-  // "looking for a barcode" forever - many medicines don't have one.
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      if (!hasScannedBarcodeRef.current) {
-        setHasScannedBarcode(true);
-        handleTakePhoto();
-      }
-    }, 5000);
-
-    return () => clearTimeout(timer);
-  }, []);
-
-
-
-
 
   // --- Permission not yet decided, or explicitly denied ---
   if (!permission) {
@@ -139,20 +166,32 @@ export default function CameraCapture({ onBarcodeFound, onPhotoCaptured }) {
         ref={cameraRef}
         style={styles.camera}
         facing="back"
+        onCameraReady={() => setIsCameraReady(true)}
         // Restricting to common retail/product barcode formats (rather
         // than every format the library supports) avoids false triggers
         // from unrelated codes and keeps scanning fast.
         barcodeScannerSettings={{
           barcodeTypes: ["ean13", "ean8", "upc_a", "code128", "qr"],
         }}
-        onBarcodeScanned={hasScannedBarcode ? undefined : handleBarcodeScanned}
+        // Always wired up (see the note at the top about not changing
+        // camera props right before a capture); duplicate sightings are
+        // ignored inside the handler instead.
+        onBarcodeScanned={handleBarcodeScanned}
       />
 
       <Text style={styles.statusText}>
-        {hasScannedBarcode ? text.scanningOcrVision : text.scanningBarcode}
+        {!isCameraReady
+          ? text.cameraStarting
+          : captureStarted
+            ? text.scanningOcrVision
+            : text.homeSubheading}
       </Text>
 
-      <Pressable style={styles.primaryButton} onPress={handleTakePhoto}>
+      <Pressable
+        style={[styles.primaryButton, !isCameraReady && styles.primaryButtonDisabled]}
+        onPress={capturePhoto}
+        disabled={!isCameraReady}
+      >
         <Text style={styles.primaryButtonLabel}>{text.takePhotoButton}</Text>
       </Pressable>
 
@@ -187,6 +226,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     marginTop: 16,
+  },
+  primaryButtonDisabled: {
+    opacity: 0.5,
   },
   primaryButtonLabel: {
     color: theme.colors.textOnPrimary,

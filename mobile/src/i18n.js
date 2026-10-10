@@ -21,6 +21,8 @@ const ne = {
   takePhotoButton: "फोटो खिच्नुहोस्",
   uploadFromGalleryButton: "ग्यालरीबाट छान्नुहोस्",
 
+  cameraStarting: "क्यामेरा खुल्दैछ...",
+
   scanningBarcode: "बारकोड खोजिँदैछ...",
   scanningOcrVision: "औषधि पहिचान गरिँदैछ...",
   scanningFailedRetry: "पत्ता लगाउन सकिएन, फेरि प्रयास गर्नुहोस्",
@@ -53,6 +55,8 @@ const en = {
   homeSubheading: "Hold the medicine box or strip in front of the camera",
   takePhotoButton: "Take Photo",
   uploadFromGalleryButton: "Choose from Gallery",
+
+  cameraStarting: "Starting camera...",
 
   scanningBarcode: "Looking for a barcode...",
   scanningOcrVision: "Identifying the medicine...",
