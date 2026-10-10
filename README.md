@@ -12,14 +12,14 @@ user confirms it rather than trusting a machine guess.
 ```
 medicine-identifier/
   backend/    FastAPI server that does the actual identification
-  frontend/   Next.js web app (works in a phone browser) - FULLY WIRED to the backend
-  mobile/     Expo / React Native app - UI only, NOT yet wired to the backend
+  frontend/   Next.js web app (works in a phone browser)
+  mobile/     Expo / React Native app (Expo Go during development)
   *.jpeg      A real strip photo used as a test fixture (see "Testing")
 ```
 
 The three parts are independent projects with their own dependencies.
-The web app and the mobile app look and behave the same; only the web app
-currently talks to the backend.
+The web app and the mobile app look and behave the same, and both talk to
+the same backend.
 
 ## How identification works
 
@@ -67,8 +67,11 @@ cd backend
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 cp env.example .env        # then put your key in GEMINI_API_KEY=
-./venv/bin/uvicorn main:app --reload --port 8000
+./venv/bin/uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+`--host 0.0.0.0` lets phones on the same Wi-Fi reach the server (needed by
+the mobile app); drop it if only the web app on this machine will use it.
 
 Get a free key at <https://aistudio.google.com/apikey>. Without a key the
 server still runs, but step 3 is off and expiry dates will only appear when
@@ -133,13 +136,29 @@ way to supply a photo.
 
 ## Running the mobile app
 
-The mobile app currently shows the camera, scans barcodes, and displays
-the captured photo. **It does not yet send anything to the backend**, so it
-cannot identify a medicine or show an expiry date. Wiring the two
-`TODO (backend step)` handlers in `mobile/src/screens/HomeScreen.js` to
-`POST /scan` is the next step.
+The mobile app shows the camera, and when the user taps **"Take Photo"**
+(or picks one from the gallery) it uploads the photo to the backend's
+`/scan` and shows the medicine's name, purpose, and expiry date with
+✅ / ❌ buttons, the same as the web app. Nothing is captured
+automatically; the user decides when the medicine is in focus. Full
+details, troubleshooting included, are in `mobile/README.md`.
 
-To run what exists:
+The phone cannot reach `localhost` on your laptop, so two things matter:
+
+1. Start the backend listening on the Wi-Fi interface, not just localhost:
+
+   ```bash
+   cd backend
+   ./venv/bin/uvicorn main:app --reload --host 0.0.0.0 --port 8000
+   ```
+
+2. The app works out the laptop's address by itself from the Expo dev
+   server (see `mobile/src/config.js`). If that guess is wrong, for example
+   when using `--tunnel`, set `BACKEND_URL_OVERRIDE` in that file to
+   something like `http://192.168.1.71:8000`. The error screen shows which
+   address was tried.
+
+To run it:
 
 ```bash
 # Expo needs Node 20+. If you use nvm:
@@ -152,7 +171,8 @@ npx expo start
 
 Install **Expo Go** from the Play Store / App Store, make sure the phone is
 on the same Wi-Fi as the computer, and scan the QR code that `expo start`
-prints. If the phone cannot connect, run `npx expo start --tunnel`.
+prints. If the phone cannot connect, run `npx expo start --tunnel` and set
+`BACKEND_URL_OVERRIDE` as described above.
 
 ## Testing
 
@@ -175,7 +195,8 @@ the manufacturing date).
 
 - [x] Web app: camera, barcode scanning, Nepali/English UI, backend call
 - [x] Backend: barcode, OCR, vision fallback, expiry parsing
-- [ ] Mobile app: connect to the backend
+- [x] Mobile app: camera, barcode scanning, backend call, result screen
+- [ ] Mobile app: production build with EAS (currently runs in Expo Go)
 - [ ] Save user confirmations / corrections to grow `medicine_db.json`
 - [ ] Lock down CORS (`allow_origins=["*"]` in `backend/main.py`) and
       pick a real backend address before deploying for other people
