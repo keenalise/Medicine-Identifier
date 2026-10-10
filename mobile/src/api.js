@@ -23,10 +23,11 @@
 import { File } from "expo-file-system";
 import { BACKEND_URL } from "./config";
 
-// The backend can take a while on a hard photo: a few seconds of OCR plus,
-// when it has to ask the vision model, up to ~30 s if the free tier is
-// rate-limiting. Give up after this so the user is never stuck forever.
-const REQUEST_TIMEOUT_MS = 60_000;
+// The backend can take a while on a hard photo: several seconds of OCR
+// plus, when it has to ask the vision model, 20-40 s if the free tier is
+// rate-limiting and the SDK is retrying. Give up after this so the user is
+// never stuck forever.
+const REQUEST_TIMEOUT_MS = 90_000;
 
 /**
  * Uploads the photo at `photoUri` (a file:// path from expo-camera or
