@@ -78,8 +78,28 @@ server still runs, but step 3 is off and expiry dates will only appear when
 OCR reads them cleanly, which is rare on foil strips.
 
 On startup the server prints whether the vision model is `ENABLED`. Check
-it any time at <http://localhost:8000/health>, which returns
-`{"status": "ok", "vision_enabled": true}`.
+it any time at <http://localhost:8000/health>:
+
+```json
+{"status": "ok", "vision_enabled": true,
+ "vision_models": {"gemini-3.6-flash": "resting until 05:48",
+                   "gemini-3.1-flash-lite": "available", "gemini-flash-lite-latest": "available"}}
+```
+
+**The free Gemini tier is small: about 20 requests per model per day**
+(plus a per-minute limit), and the counter resets at midnight Pacific
+time. A scan uses one request, or two when the medicine was not matched
+by OCR. The backend therefore never spends a request at startup, tries the
+models listed in `VISION_MODEL_NAMES` (`backend/vision_fallback.py`) in
+order, and when one reports its daily quota used up it rests that model
+and moves to the next. `/health` shows a resting model as
+`"resting until HH:MM"`. If every model is resting, scans still work but
+the expiry comes from OCR alone, which on foil strips usually means none.
+Each scan also prints one `[scan]` line to the console saying what OCR
+found, what the vision model did, and how long each took.
+
+Google retires model names regularly. If scans log `NotFound`, update
+`VISION_MODEL_NAMES` from <https://ai.google.dev/gemini-api/docs/models>.
 
 ### API
 

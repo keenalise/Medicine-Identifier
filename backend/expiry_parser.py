@@ -464,6 +464,26 @@ def analyze_expiry_texts(texts: list) -> tuple:
     return best
 
 
+def expiry_is_after_mfg(expiry_text: str | None, mfg_text: str | None) -> bool | None:
+    """
+    Sanity check for a pair of dates read off one package: the expiry must
+    be LATER than the manufacturing date. Returns True/False when both
+    dates are complete enough to compare (year known), None when they are
+    not (so the caller can't draw a conclusion either way).
+
+    Why: a vision model reading a blurry photo sometimes blends the two
+    printed dates ("MFG.21 JUN.2026 EXP.20 JUN.2029" -> "20 JUN 2026").
+    Such a blend is never later than the mfg date, so this catches it.
+    """
+    if not expiry_text or not mfg_text:
+        return None
+    exp_key = _date_sort_key(_normalize_ocr_text(expiry_text))
+    mfg_key = _date_sort_key(_normalize_ocr_text(mfg_text))
+    if exp_key[0] == 0 or mfg_key[0] == 0:
+        return None
+    return exp_key > mfg_key
+
+
 def find_expiry_text(raw_text: str) -> str | None:
     """
     Looks through `raw_text` for an expiry date and returns it as raw text
